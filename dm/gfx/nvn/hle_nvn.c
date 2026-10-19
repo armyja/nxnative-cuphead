@@ -1009,6 +1009,9 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     mtl_sub_begin();
     nvn_ft_poll();
     mtl_sub_index((const uint64_t *)h, n);
+    // Diagnostic DM_NVN_SUBLOG=1: the command handles submitted per frame, so a frame that renders wrong can be tied to
+    // the command buffer(s) it replayed
+    { static int sl = -1; if (sl < 0) sl = getenv("DM_NVN_SUBLOG") != NULL; if (sl) { fprintf(stderr, "[sub] F%llu n=%d", (unsigned long long)dm_guest_frame(), n); for (int i = 0; i < n && i < 8; i++) fprintf(stderr, " %#llx", (unsigned long long)((const uint64_t *)h)[i]); fputc('\n', stderr); } }
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
     uint64_t sub_fence = mtl_sub_commit();
