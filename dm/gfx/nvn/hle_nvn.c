@@ -1006,7 +1006,19 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     mtl_sub_index((const uint64_t *)h, n);
     for (int i = 0; i < n; i++) { mtl_exec_rest((const uint64_t *)h + i + 1, n - i - 1); mtl_exec((const uint8_t *)h[i]); }
     mtl_exec_rest(NULL, 0);
-    mtl_sub_commit();
+    uint64_t sub_fence = mtl_sub_commit();
+    // Diagnostic DM_NVN_SYNC_SUBMIT=1: wait for the GPU to finish this submission before returning to the game, so the
+    // game cannot rewrite memory the submission still reads. This separates "a race with the CPU's writes" (the picture
+    // becomes clean) from "the data handed to the GPU is wrong already" (the picture stays broken). Slow; never leave on.
+    // DM_NVN_MAX_INFLIGHT=<n>: keep at most n submissions in flight, waiting here for the older ones. The zero-copy
+    // guest memory is written by the game itself, so a submission that is still in flight reads whatever the game has
+    // written since: with more submissions in flight than the game's own buffers are deep, animated geometry comes out
+    // torn (thin stretched triangles, different every frame, even when the player stands still). 1 is fully
+    // synchronous and proves the cause; unset (0) keeps the former behaviour.
+    { static int maxinf = -1;
+      if (maxinf < 0) { const char *e = getenv("DM_NVN_MAX_INFLIGHT"); maxinf = e ? atoi(e) : 0;
+          if (maxinf > 0) LOG("[nvn] DM_NVN_MAX_INFLIGHT=%d: at most %d submissions in flight", maxinf, maxinf); }
+      if (maxinf > 0 && sub_fence > (uint64_t)maxinf) mtl_wait(sub_fence - (uint64_t)maxinf, UINT64_MAX); }
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
