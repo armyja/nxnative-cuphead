@@ -6407,6 +6407,9 @@ void mtl_exec(const uint8_t *p) {
                 break; }
             case OP_CLEAR_BUF: { const p_clear_buf *cb = a; mtl_sub_fill(cb->addr, cb->size, cb->value); break; }
             case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8);
+                // Diagnostic DM_NVN_COPYLOG=1: list every buffer-to-buffer copy with its frame, so a frame that renders
+                // wrong can be compared copy for copy with the frames around it
+                { static int cl = -1; if (cl < 0) cl = getenv("DM_NVN_COPYLOG") != NULL; if (cl) fprintf(stderr, "[copylog] F%llu src=%#llx dst=%#llx n=%llu\n", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)s_, (unsigned long long)d, (unsigned long long)n); }
                 PD("Y copy_b2b cmd=%p src=%#llx dst=%#llx bytes=%llu", p, (unsigned long long)s_, (unsigned long long)d, (unsigned long long)n); mtl_sub_copy(s_, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8);
                 PD("Y update_ub cmd=%p src=%#llx dst=%#llx bytes=%llu f=%g,%g,%g,%g", p, (unsigned long long)((const uint8_t *)a + 16), (unsigned long long)d, (unsigned long long)n,
