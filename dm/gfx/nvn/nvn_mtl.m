@@ -5516,6 +5516,17 @@ frz_plain:;
         }
     }
     g_stat_draw++;
+    // Diagnostic DM_NVN_SKIP_DRAW=a-b[,c-d]: drop draws by their index within the frame (0-based, in encode
+    // order), nothing else; skipping a group and looking at whether a specific artefact survives is how a
+    // defect that belongs to one draw is bisected down to that draw.
+    { static int sd_on = -1; static long sd_a = -1, sd_b = -1, sd_c = -1, sd_d = -1;
+      if (sd_on < 0) { const char *e = getenv("DM_NVN_SKIP_DRAW"); sd_on = e && *e;
+          if (sd_on) { sscanf(e, "%ld-%ld,%ld-%ld", &sd_a, &sd_b, &sd_c, &sd_d); if (sd_b < sd_a) sd_b = sd_a; if (sd_d < sd_c) sd_d = sd_c;
+              MLOG("DM_NVN_SKIP_DRAW: dropping frame-local draws %ld-%ld and %ld-%ld (diagnostic; the picture is wrong)", sd_a, sd_b, sd_c, sd_d); } }
+      static uint64_t sd_frame = ~0ull; static long sd_k;
+      if (sd_on) { uint64_t f = atomic_load(&g_cur_frame); if (f != sd_frame) { sd_frame = f; sd_k = 0; }
+          long k = sd_k++;
+          if ((sd_a >= 0 && k >= sd_a && k <= sd_b) || (sd_c >= 0 && k >= sd_c && k <= sd_d)) return; } }
     { static int tg; if (!tg) { tg = 1; const char *e = getenv("DM_TEST_GHOST"); float v[8];   // Test switch DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy (normalized; press point, grid, center of the drag-follow image): turns on the drag-follow image directly without going through the front end (for Mac host screenshot verification)
         if (e && sscanf(e, "%f,%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) mtl_ui_ghost(1, v[0], v[1], &v[2], v[6], v[7]); } }
     if (dw && atomic_load(&g_ghost_on)) ghost_note(dw);
