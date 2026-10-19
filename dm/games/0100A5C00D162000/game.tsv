@@ -1,0 +1,70 @@
+# Game profile of Cuphead (Switch base game v0). Unity 2017.4.9f1 (IL2CPP), SDK 5.5.0.0, renders with NVN.
+# Format: see dm/games/README.md
+#
+# Rebuilt from the rewriter's own build records after the original work folder was lost: the recorded
+# patch_nso.py hash (e1d060fc…) matches fork/offset-table-family, and today's upstream rewriter reproduces
+# the same PATCH_OFF values (main 0x3650000, sdk 0xc50000, subsdk0 0x700000) and the same 94 sdk gates,
+# so the modules this profile builds are the ones the earlier sessions ran.
+
+# ---- Identity ----
+title_id	0100A5C00D162000
+program_id	0100A5C00D162000
+name	Cuphead
+ipa	Cuphead.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+# Build IDs taken from the rewritten modules' fixups.tsv; only the base game is extracted.
+build	v0	1.0.0	main=ffe6641915cd2f4ca749be725f09e4ea	sdk=5afd9bdf1a579f10081d2ba1c4f9c7ac	subsdk0=66ce9a2e7c75fc6d0a7fe1b5d6d5baee
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# Load order as on Horizon: main, subsdk*, sdk (subsdk0 = the movie module).
+modules	main subsdk0 sdk
+romfs_marker	Data/globalgamemanagers
+zip_store	.bundle:.assets:.resource:.unity3d
+
+# ---- NVN API version ----
+# The game reads nvnDeviceGetInteger(API_MAJOR / API_MINOR) and refuses to run otherwise: it requires major == 53
+# and minor > 208 (main+0x1683148: cmp w8,#0x35, then cmp w8,#0xd0 with b.gt; both failing paths trap). The host's
+# default 55.15 made it trap right after WindowCrop. 53.313 is the SDK 10 value that passes; the exact minimum
+# minor this build accepts is not measured yet.
+device_api	53.313
+
+# ---- Presentation ----
+# Unity 2017.4 paces its own logic from the present interval; leave it to the game.
+present_interval	game
+
+# ---- Memory ----
+# The NPDM declares a system resource, so the SDK sizes the heap as total − used. The application pool is the
+# Switch's own 3285 MB, which makes SetHeapSize ask for 0xC8800000 (pool − 64 MB − 1 MB) and the guest block
+# hold it beside a 2 GB alias region. Not yet measured on this title: verify with DM_SVC=1 (the SetHeapSize
+# request and the highest MapPhysicalMemory address) before trusting the split.
+mem_reserve	0x180000000
+mem_alias	0x80000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The rewritten modules are 0x4C00000 (76 MB), more than the 64 MB default the host reports as used, so the
+# game's own "pool − used" heap request (0xC9400000) failed the host's pool check against the module size and
+# the heap stayed at 0.03 GB; Unity's allocator then asserted in dlmalloc (main+0x1396E04, svcBreak
+# reason 0x80000007). Reported as 77 MB, the game asks for 0xC8700000, which fits the pool with the modules.
+# Measured: [mem] "SetHeapSize 0xc9400000 + modules 0x4c00000 > app pool 0xcd500000" at boot.
+mem_used	0x4D00000
+
+# ---- Shader split (shader_split.py) ----
+# Unity 2017.4 keeps its built-ins in Data/Resources + globalgamemanagers; the game's own shaders are in the
+# StreamingAssets bundles.
+shader_groups	/Resources/=engine /StreamingAssets/=assets
+shader_note	Cuphead shaders
+
+# ---- NVN driver constant segments ----
+# Not measured for this title yet: these are Mario's values, which are also the translator's built-in defaults.
+# They only steer per-slot texture / image type lookups while building (this profile's shader_facts.tsv has no
+# per-slot rows), so they do not change the translated code; measure them over all shaders before relying on them.
+nvn_tex_base	0x20
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
