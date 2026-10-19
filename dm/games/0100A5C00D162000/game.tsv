@@ -37,11 +37,13 @@ device_api	53.313
 present_interval	game
 
 # ---- Command memory ----
-# The host's command records are larger than real-device NVN commands. Writing them into the game's own command
-# memory fills that pool, and the game grows its command-buffer ring out of the same pool, so growth fails, the ring
-# stays full and the game spins in `while (!emit) nvnQueueFlush(empty queue)`. Recording into host segments instead
-# turned 2 hangs in 8 runs into 20 clean runs of 1500 frames (measured in the earlier sessions).
-nvn_hostseg_only	on
+# Host segments were used here earlier to keep the game's command-memory pool from filling up. They are OFF now: the
+# host reclaims a segment a few frames after its recording, but the game keeps calling recorded command handles, so
+# the replay read overwritten commands. Measured on the world map over 24 consecutive frames: with host-lent segments
+# every ~4th frame showed a completely different camera (whole-screen wrong view, large blue triangles); with the
+# game's own command memory those 24 frames are stable. The pool filling up is not observed any more, because the
+# heap accounting above is now honest (see mem_used).
+nvn_hostseg_only	off
 
 # ---- Memory ----
 # The NPDM declares a system resource, so the SDK sizes the heap as total − used. The application pool is the
