@@ -715,8 +715,13 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *sb, *db; uint64_t so, dof;
-    if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
-        MDIE("buffer copy address is in no memory pool src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+    // An address outside every memory pool means the game copies from/to memory the host does not know (a pool it
+    // already finalized, or a range it never registered). Dying here ended whole sessions over one copy, so report the
+    // first one and drop that copy: the rest of the frame still renders and the log names the addresses.
+    if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof)) {
+        static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropcopy] F%llu src=%#llx dst=%#llx n=%#llx\n",
+                 (unsigned long long)dm_guest_frame(), (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+        return; }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 
@@ -779,6 +784,9 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
         if (!g_ubs_buf) MDIE("uniform update ring allocation failed %#zx", g_ubs_size);
         res_add(g_ubs_buf); g_ubs_off = 0;
+        // Diagnostic DM_NVN_UBWRAP=1: log when the 1 MB uniform-update ring is replaced, so it can be correlated with
+        // frames that render wrong (the deferred updates of this pass still point into the old block)
+        { static int wr = -1; if (wr < 0) wr = getenv("DM_NVN_UBWRAP") != NULL; if (wr) fprintf(stderr, "[ubwrap] F%llu ring replaced (need %zu)\n", (unsigned long long)dm_guest_frame(), need); }
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
     if (defer) { g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; g_ubd_deferred++; args_dirty_all(); }   // see ubd_shadow
