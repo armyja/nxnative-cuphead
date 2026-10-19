@@ -5130,6 +5130,12 @@ static void fb_prepare(NvProg *pr) {
             id<MTLTexture> snap = fb_snap_tex(base.pixelFormat, w, h); if (!snap) continue;
             if (g_enc) rp_end();
             id<MTL4ComputeCommandEncoder> e = blit(); enc_b_copy_texture(e, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), snap, 0, 0, MTLOriginMake(0, 0, 0));
+            // Which fragment shaders actually need this: with DM_NVN_FB_SNAP=all every candidate is reported once, and
+            // exactly those keys belong in the profile's feedback_snap (the "all" form splits a pass for every draw)
+            { static char seen[96][20]; static int nseen;
+              int have = 0; for (int q = 0; q < nseen; q++) if (!strcmp(seen[q], fs->key)) { have = 1; break; }
+              if (!have) { if (nseen < 96) snprintf(seen[nseen++], sizeof seen[0], "%s", fs->key);
+                  MLOG("feedback snapshot needed by fragment shader %s", fs->key); } }
             MTLTextureSwizzleChannels sw = t.swizzle;
             int same = t.pixelFormat == snap.pixelFormat && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
             id<MTLTexture> use = same ? snap : [snap newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
