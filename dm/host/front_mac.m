@@ -4,6 +4,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#import <GameController/GameController.h>
 #include "dm.h"
 #include "dm_input.h"
 #include "dm_uiscreen.h"
@@ -48,8 +49,46 @@ static void on_key(NSEvent *e, int down) {
     push();
 }
 
-typedef struct { void (*fn)(void); } guest_arg;
-static void *guest_tramp(void *p) {
+// ---------- Physical controller (GameController.framework) ----------
+// The Mac front end was keyboard only, so a player with just a gamepad could not drive the game at all. An extended
+// controller is mapped onto the same buttons the keyboard sets and goes through the controller path (dm_pad_set),
+// which is ORed with the keyboard: both work at once and neither overrides the other.
+static uint64_t g_pad; static int32_t g_pad_lx, g_pad_ly;
+static void pad_push(void) { dm_pad_set(g_pad, g_pad_lx, g_pad_ly, 0, 0); }
+static void pad_bit(int bit, BOOL down) { if (down) g_pad |= 1ull << bit; else g_pad &= ~(1ull << bit); pad_push(); }
+static void pad_wire(GCExtendedGamepad *p) {
+    if (!p) return;
+    p.buttonA.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(0, pressed); };   // A
+    p.buttonB.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(1, pressed); };   // B
+    p.buttonX.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(2, pressed); };   // X
+    p.buttonY.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(3, pressed); };   // Y
+    p.leftShoulder.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(6, pressed); };   // L
+    p.rightShoulder.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(7, pressed); };  // R
+    p.leftTrigger.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(8, pressed); };    // ZL
+    p.rightTrigger.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(9, pressed); };   // ZR
+    p.dpad.left.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(12, pressed); };
+    p.dpad.up.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(13, pressed); };
+    p.dpad.right.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(14, pressed); };
+    p.dpad.down.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(15, pressed); };
+    if (@available(macOS 10.15, *)) {   // Menu (≡ / Start) = +, View (⧉ / Back) = −: saving needs them
+        p.buttonMenu.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(10, pressed); };
+        if (p.buttonOptions) p.buttonOptions.valueChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL pressed) { pad_bit(11, pressed); };
+    }
+    p.leftThumbstick.valueChangedHandler = ^(GCControllerDirectionPad *d, float x, float y) { g_pad_lx = (int32_t)(x * 32767); g_pad_ly = (int32_t)(y * 32767); pad_push(); };
+}
+static void pad_attach(GCController *c) {
+    if (!c) return;
+    pad_wire(c.extendedGamepad);
+    LOG("gamepad: '%s' attached (extended=%d)", c.vendorName.UTF8String ?: "?", c.extendedGamepad != nil);
+}
+static void pad_init(void) {
+    for (GCController *c in [GCController controllers]) pad_attach(c);
+    [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue]
+                                                 usingBlock:^(NSNotification *n) { pad_attach(n.object); }];
+    [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    LOG("gamepad: GameController started (%lu controller(s) already connected)", (unsigned long)[[GCController controllers] count]);
+}
+typedef struct { void (*fn)(void); } guest_arg;static void *guest_tramp(void *p) {
     static char alt[65536];                       // The signal alternate stack is per thread; crash printing must also work on the guest thread
     stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);
     ((guest_arg *)p)->fn(); LOG("guest thread finished"); exit(0);
@@ -75,6 +114,7 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+        pad_init();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);

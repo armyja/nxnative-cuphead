@@ -26,11 +26,72 @@ static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history ent
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
 }
+static void rec_set(void);   // defined with the recorder below
+static int32_t ax(uint64_t v, int i); static int32_t pick(int32_t a, int32_t b);   // stick helpers, defined with the state fill
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
+    rec_set();
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
+    rec_set();
+}
+// ---------- Controller input recorder / replayer ----------
+// DM_RECORD_IN=<path>: append one row per change of the front end's pad state, so a session's input can be replayed
+// exactly afterwards. Columns as the earlier sessions used them:
+//   seconds <TAB> buttons <TAB> lx <TAB> ly <TAB> rx <TAB> ry <TAB> presented frame
+// DM_PLAY_IN=<path>: replay such a file stepped by the presented frame number (frame 0 = the first presented frame),
+// the way DM_KEYS's "f<frame>:" steps work: the machine's speed never shifts the route. A replayed file and DM_KEYS
+// never run together (DM_KEYS wins and the file is ignored, with a red line).
+typedef struct { uint64_t frame, btn; int32_t lx, ly, rx, ry; } in_row;
+static FILE *g_rec; static int g_rec_tried;
+static uint64_t g_rec_btn; static int32_t g_rec_lx, g_rec_ly, g_rec_rx, g_rec_ry;
+static void rec_set(void) {
+    if (!g_rec_tried) {
+        g_rec_tried = 1; const char *e = getenv("DM_RECORD_IN");
+        if (e && *e) {
+            if ((g_rec = fopen(e, "w"))) { fprintf(g_rec, "# t\tbuttons\tlx\tly\trx\try\tframe\n"); fflush(g_rec); LOG("DM_RECORD_IN: recording pad input to %s", e); }
+            else LOG("[RED] DM_RECORD_IN: cannot open %s", e);
+        }
+    }
+    if (!g_rec) return;
+    // Record the state the game will see: the keyboard / touch path and the controller path merged, so a gamepad-only
+    // session replays exactly like a keyboard one.
+    int32_t lx = pick(ax(atomic_load(&g_axes), 0), ax(atomic_load(&g_pad_axes), 0));
+    int32_t ly = pick(ax(atomic_load(&g_axes), 1), ax(atomic_load(&g_pad_axes), 1));
+    int32_t rx = pick(ax(atomic_load(&g_axes), 2), ax(atomic_load(&g_pad_axes), 2));
+    int32_t ry = pick(ax(atomic_load(&g_axes), 3), ax(atomic_load(&g_pad_axes), 3));
+    uint64_t buttons = atomic_load(&g_btn) | atomic_load(&g_pad_btn);
+    if (buttons == g_rec_btn && lx == g_rec_lx && ly == g_rec_ly && rx == g_rec_rx && ry == g_rec_ry) return;
+    g_rec_btn = buttons; g_rec_lx = lx; g_rec_ly = ly; g_rec_rx = rx; g_rec_ry = ry;
+    extern uint64_t g_t0_ns; uint64_t now_ns(void);
+    fprintf(g_rec, "%.3f\t%llu\t%d\t%d\t%d\t%d\t%llu\n", (now_ns() - g_t0_ns) / 1e9, (unsigned long long)buttons, lx, ly, rx, ry, (unsigned long long)dm_guest_frame());
+    fflush(g_rec);
+}
+static void *in_main(void *arg) {
+    in_row *rows = arg; size_t n = 0;
+    while (n < 65536 && rows[n].frame) n++;   // rows are terminated by a zero frame
+    for (size_t i = 0; i < n; i++) {
+        while (dm_guest_frame() < rows[i].frame) usleep(2000);
+        dm_pad_set(rows[i].btn, rows[i].lx, rows[i].ly, rows[i].rx, rows[i].ry);
+    }
+    dm_pad_set(0, 0, 0, 0, 0);
+    return NULL;
+}
+static void play_in(void) {
+    const char *e = getenv("DM_PLAY_IN"); if (!e || !*e) return;
+    if (getenv("DM_KEYS") && *getenv("DM_KEYS")) { LOG("[RED] DM_PLAY_IN ignored: DM_KEYS is set too, run one of them"); return; }
+    FILE *f = fopen(e, "r"); if (!f) { LOG("[RED] DM_PLAY_IN: cannot open %s", e); return; }
+    in_row *rows = calloc(65536, sizeof *rows); size_t n = 0; char line[256];
+    while (n < 65535 && fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        double t; unsigned long long b; int lx, ly, rx, ry; unsigned long long fr;
+        if (sscanf(line, "%lf\t%llu\t%d\t%d\t%d\t%d\t%llu", &t, &b, &lx, &ly, &rx, &ry, &fr) != 7) continue;
+        rows[n++] = (in_row){ fr, b, lx, ly, rx, ry };
+    }
+    fclose(f);
+    LOG("DM_PLAY_IN: %zu steps from %s (stepped by presented frame)", n, e);
+    pthread_t th; if (n && !pthread_create(&th, NULL, in_main, rows)) pthread_detach(th);
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,
@@ -53,7 +114,8 @@ static void *keys_main(void *arg) {
     return NULL;
 }
 void hid_keys_init(void) {
-    const char *e = getenv("DM_KEYS"); if (!e || !*e) return;
+    rec_set();   // DM_RECORD_IN: open the file and write the initial state before any input arrives
+    const char *e = getenv("DM_KEYS"); if (!e || !*e) { play_in(); return; }
     static const char *names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
     char buf[4096]; snprintf(buf, sizeof buf, "%s", e);
     for (char *tok = strtok(buf, ","); tok && g_nsteps < KEY_STEPS; tok = strtok(NULL, ",")) {
@@ -82,7 +144,8 @@ void hid_keys_init(void) {
     // that mixes them keeps its listed order
     int mixed = 0; for (int i = 1; i < g_nsteps; i++) mixed |= g_steps[i].frame != g_steps[0].frame;
     if (!mixed) for (int i = 1; i < g_nsteps; i++) { key_step s = g_steps[i]; int j = i; while (j > 0 && g_steps[j - 1].at > s.at) { g_steps[j] = g_steps[j - 1]; j--; } g_steps[j] = s; }
-    pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS: %d steps", g_nsteps); }
+    pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS: %d steps", g_nsteps); return; }
+    play_in();
 }
 
 static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
