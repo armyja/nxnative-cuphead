@@ -617,14 +617,33 @@ uint64_t dm_nvn_frame_count(void);
 typedef struct { uint8_t *mem; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
+// nvn_hostseg_only (profile key, DM_NVN_HOSTSEG_ONLY overrides it): record every command into a host segment and never
+// write the game's own command memory. Our records are larger than real-device NVN commands, so writing them into the
+// game's pool fills it; the game grows its command-buffer ring out of that same pool, so growth fails, the ring stays
+// full and the game spins in `while (!emit) nvnQueueFlush(empty queue)` (Cuphead: 2 of 8 runs hung that way, and
+// 20 of 20 ran 1500 frames clean with this on). Off by default: the titles that grew their budget for exactly this
+// reason rely on the game's own memory, and CALLed command handles must stay valid (see the segment comments above).
+static int g_hostseg_only = -1;
+static int hostseg_only(void) {
+    if (g_hostseg_only < 0) {
+        const char *e = getenv("DM_NVN_HOSTSEG_ONLY");
+        g_hostseg_only = e ? atoi(e) != 0 : DM_GAME_NVN_HOSTSEG_ONLY;
+        LOG("[nvn] command memory policy: nvn_hostseg_only = %d (source: %s)", g_hostseg_only, e ? "DM_NVN_HOSTSEG_ONLY" : "game profile");
+    }
+    return g_hostseg_only;
+}
 // Take a segment: origin = the current recording's guest bytes [BEGIN, end of JUMP); if the write pointer is already in a host segment (overflowing again), keep that segment's origin
 static uint8_t *hostseg_take(const cmd_t *o) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
+    // Never writing the game's memory means the game never gives our bytes out again, so the guest-range reclaim below
+    // cannot fire: with this policy a segment is dead once its recording was submitted a few frames ago (Cuphead
+    // records every frame and submits in the same one).
+    if (hostseg_only()) for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].frame + 8 < f) g_hostseg[i].busy = 0;
     int in_seg = 0;
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + HOSTSEG_SZ) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
-    if (!in_seg && o && o->recording && o->cur) { lo = o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
+    if (!hostseg_only() && !in_seg && o && o->recording && o->cur) { lo = o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
     for (int i = 0; i < g_nhostseg && !m; i++)
         if (!g_hostseg[i].busy) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, f, 1, lo, hi }; m = g_hostseg[i].mem; }
     if (!m && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SZ <= HOSTSEG_CAP) {
@@ -646,6 +665,8 @@ static void hostseg_release(uintptr_t lo, uintptr_t hi) {
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
+    // nvn_hostseg_only: hand out a host segment for every grant and leave the game's pool untouched (see hostseg_only)
+    if (hostseg_only()) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(CB(c)), HOSTSEG_SZ); CB(c)->used = 0; return; }
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(CB(c)), HOSTSEG_SZ); return; }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));

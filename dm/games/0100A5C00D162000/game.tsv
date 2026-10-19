@@ -36,6 +36,13 @@ device_api	53.313
 # Unity 2017.4 paces its own logic from the present interval; leave it to the game.
 present_interval	game
 
+# ---- Command memory ----
+# The host's command records are larger than real-device NVN commands. Writing them into the game's own command
+# memory fills that pool, and the game grows its command-buffer ring out of the same pool, so growth fails, the ring
+# stays full and the game spins in `while (!emit) nvnQueueFlush(empty queue)`. Recording into host segments instead
+# turned 2 hangs in 8 runs into 20 clean runs of 1500 frames (measured in the earlier sessions).
+nvn_hostseg_only	on
+
 # ---- Memory ----
 # The NPDM declares a system resource, so the SDK sizes the heap as total − used. The application pool is the
 # Switch's own 3285 MB, which makes SetHeapSize ask for 0xC8800000 (pool − 64 MB − 1 MB) and the guest block
