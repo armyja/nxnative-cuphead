@@ -110,6 +110,8 @@ def header(g):
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
+    nmi = g.get('nvn_max_inflight', '-1')   # how many submissions may be in flight before the host waits (hle_nvn.c): -1 = unbounded, 0 = fully synchronous
+    if not re.fullmatch(r'-?\d+', nmi): sys.exit(f'{g.id}: nvn_max_inflight must be an integer: {nmi}')
     hso = g.get('nvn_hostseg_only', 'off')   # record every command into a host segment and never into the game's own command memory (hle_nvn.c): on / off
     if hso not in ('on', 'off'): sys.exit(f'{g.id}: nvn_hostseg_only must be on or off: {hso}')
     gts = g.get('gpu_timestamps', 'submission')   # counter timestamps (nvn_mtl.m rep_ticks): submission = one time per submission, segment = the GPU start / end of the segment holding the report
@@ -151,6 +153,7 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_NVN_HOSTSEG_ONLY {int(hso == "on")}',
+         f'#define DM_GAME_NVN_MAX_INFLIGHT {int(nmi)}',
          f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}',
          f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}',
          '']

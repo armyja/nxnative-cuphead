@@ -640,7 +640,9 @@ static uint8_t *hostseg_take(const cmd_t *o) {
     // Never writing the game's memory means the game never gives our bytes out again, so the guest-range reclaim below
     // cannot fire: with this policy a segment is dead once its recording was submitted a few frames ago (Cuphead
     // records every frame and submits in the same one).
-    if (hostseg_only()) for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].frame + 8 < f) g_hostseg[i].busy = 0;
+    if (hostseg_only()) { static long age = -2;
+        if (age == -2) { const char *e = getenv("DM_NVN_HOSTSEG_AGE"); age = e ? atol(e) : 8; if (age != 8) LOG("[nvn] DM_NVN_HOSTSEG_AGE=%ld: host segments are reclaimed %ld frames after their recording", age, age); }
+        for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].frame + (uint64_t)age < f) g_hostseg[i].busy = 0; }
     int in_seg = 0;
     for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + HOSTSEG_SZ) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!hostseg_only() && !in_seg && o && o->recording && o->cur) { lo = o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
@@ -672,6 +674,9 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p pool %p +%#lx length %#zx (recording %d)", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
+    // DM_NVN_WRAPLOG=1: log every time the game hands out the start of its command-memory ring again (offset 0), so this
+    // event can be correlated with frames that render wrong
+    { static int wl = -1; if (wl < 0) wl = getenv("DM_NVN_WRAPLOG") != NULL; if (wl && off == 0) LOG("[nvn] command-memory ring wrapped at frame %llu (len %#zx)", (unsigned long long)dm_nvn_frame_count(), n); }
     cmd_new_segment(CB(c), pl->mem + off, n);
     CB(c)->used = 0;   // GetCommandMemoryUsed counts from the start of the memory the game last added, across recordings (see there)
 }
@@ -1015,10 +1020,10 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     // written since: with more submissions in flight than the game's own buffers are deep, animated geometry comes out
     // torn (thin stretched triangles, different every frame, even when the player stands still). 1 is fully
     // synchronous and proves the cause; unset (0) keeps the former behaviour.
-    { static int maxinf = -1;
-      if (maxinf < 0) { const char *e = getenv("DM_NVN_MAX_INFLIGHT"); maxinf = e ? atoi(e) : 0;
-          if (maxinf > 0) LOG("[nvn] DM_NVN_MAX_INFLIGHT=%d: at most %d submissions in flight", maxinf, maxinf); }
-      if (maxinf > 0 && sub_fence > (uint64_t)maxinf) mtl_wait(sub_fence - (uint64_t)maxinf, UINT64_MAX); }
+    { static int maxinf = -2;
+      if (maxinf == -2) { const char *e = getenv("DM_NVN_MAX_INFLIGHT"); maxinf = e ? atoi(e) : DM_GAME_NVN_MAX_INFLIGHT;
+          if (maxinf >= 0) LOG("[nvn] DM_NVN_MAX_INFLIGHT=%d: at most %d submissions in flight (0 = fully synchronous)", maxinf, maxinf); }
+      if (maxinf >= 0 && sub_fence > (uint64_t)maxinf) mtl_wait(sub_fence - (uint64_t)maxinf, UINT64_MAX); }
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
