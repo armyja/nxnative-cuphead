@@ -574,6 +574,39 @@ void mtl_sub_begin(void) {
     void arena_begin(void); arena_begin();
 }
 
+uint64_t dm_guest_frame(void);   // hle_os.c: the presented frame number
+// ---------- Diagnostic DM_NVN_WATCHVB=1: did the guest change memory after we read it? ----------
+// The host reads vertex data at encode time; a real GPU reads it later. If the guest writes one of those ranges
+// between the two, the picture is built from a torn buffer. Snapshot each used vertex range on first use in a
+// submission and compare again just before the submission is committed.
+#define WATCH_MAX 64
+#define WATCH_BUDGET (1u << 20)
+static struct { uint64_t a, n; uint8_t *copy; } g_watch[WATCH_MAX];
+static int g_nwatch, g_watch_on = -1; static size_t g_watch_bytes;
+static void watch_reset(void) { for (int i = 0; i < g_nwatch; i++) free(g_watch[i].copy), g_watch[i].copy = NULL; g_nwatch = 0; g_watch_bytes = 0; }
+static void watch_add(uint64_t a, uint64_t n) {
+    if (g_watch_on < 0) { g_watch_on = getenv("DM_NVN_WATCHVB") != NULL; if (g_watch_on) MLOG("DM_NVN_WATCHVB=1: watching whether the guest rewrites vertex ranges after they were read"); }
+    if (!g_watch_on || !a || !n || n > (64u << 10) || g_nwatch >= WATCH_MAX || g_watch_bytes + n > WATCH_BUDGET) return;
+    for (int i = 0; i < g_nwatch; i++) if (g_watch[i].a == a && g_watch[i].n == n) return;
+    void *mb; uint64_t mo; if (!mtl_addr(a, 1, &mb, &mo)) return;
+    const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo;
+    uint8_t *c = malloc(n); if (!c) return;
+    memcpy(c, p, n);
+    g_watch[g_nwatch++] = (typeof(g_watch[0])){ a, n, c }; g_watch_bytes += n;
+}
+static int watch_check(void) {
+    if (!g_watch_on || !g_nwatch) return 0;
+    int changed = 0; uint64_t first = 0;
+    for (int i = 0; i < g_nwatch; i++) {
+        void *mb; uint64_t mo; if (!mtl_addr(g_watch[i].a, 1, &mb, &mo)) continue;
+        const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo;
+        if (memcmp(p, g_watch[i].copy, g_watch[i].n)) { changed++; if (!first) first = g_watch[i].a; }
+    }
+    if (changed) { static int n; if (n++ < 400) fprintf(stderr, "[watchvb] F%llu %d of %d vertex ranges changed after the host read them (first %#llx)\n", (unsigned long long)dm_guest_frame(), changed, g_nwatch, (unsigned long long)first); }
+    watch_reset();
+    return changed;
+}
+
 static void rp_end(void);
 extern int g_frz_on; static int g_frz_state;   // World freeze: the state latched for this frame (0 normal / 1 full frame / 2 frozen frame), see the note above frz_op
 // DM_NVN_PASSGPU_SERIAL=1 (for measurement): before creating each encoder on the main command buffer, encode 'signal n+1 → wait for signal n+1' - the signal is only raised once all prior work has completed,
@@ -898,6 +931,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
 uint64_t mtl_sub_commit(void) {
+    watch_check();   // DM_NVN_WATCHVB: did the guest rewrite a vertex range after the host read it?
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
@@ -5437,7 +5471,7 @@ frz_plain:;
         if (!S.vbuf[s_].address) continue;
         void *mb; uint64_t mo;
         uint64_t gpu;
-        if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); }
+        if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); watch_add(S.vbuf[s_].address, S.vbuf[s_].size); }
     }
     static id<MTLBuffer> zero; if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); }
     static uint64_t zero_gpu; if (!zero_gpu) zero_gpu = zero.gpuAddress;
