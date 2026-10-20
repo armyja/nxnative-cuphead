@@ -22,6 +22,17 @@ defect: no ROM/NSP/XCI, no keys, no extracted data, no patched binaries and no s
 own legally obtained copy and your own `prod.keys`; this project does not provide or explain how to obtain
 either. Not affiliated with Nintendo or Studio MDHR.
 
+## The two questions a reviewer asks first
+
+1. **Texture content (especially vertex-stage), in-run A/B: not done yet.** The measured texture facts are
+   *binding identity* (clean) and texture-to-buffer copies (they feed no draw); the content a draw samples has
+   never been imaged. A per-frame A/B needs a private copy of each vertex-stage texture at encode time. A
+   texture copy ends the render pass, so the snapshot has to be taken before the pass opens (or the pass
+   re-opened after it); the design is in Open problems. Nothing in the table below covers texture content.
+2. **"Not GPU delay", per-frame 50/50: done.** `DM_NVN_DRAIN=ab` waits for the frame's own submission on every
+   second frame: 8000 77/249 (drain) vs 70/250 (async), 12000 55 vs 51, 15000 41 vs 42. No effect. This
+   replaces the old cross-run `MAX_INFLIGHT` comparison (94 vs 18 of 501).
+
 ## What it looks like
 
 These are contact sheets of the highest-scoring frames from the runs named in each caption (320x180
