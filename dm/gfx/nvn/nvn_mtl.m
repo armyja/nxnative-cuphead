@@ -862,6 +862,24 @@ static int cps_here(void) {
     if (m == 1) return f >= g_cps_a && f <= g_cps_b;
     uint64_t h = (uint64_t)f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; return (int)(h & 1);
 }
+// Snapshot copy-source bytes at encode time into the snapshot ring: the guest may reuse the source before the
+// GPU executes the copy, so the GPU must read the bytes as of this position in the command stream.
+static int cps_snap(const void *src, size_t n, id<MTLBuffer> *out, size_t *off) {
+    if (!cps_here()) return 0;
+    if (n > (8u << 20)) { if (g_cps_skip++ < 8) MLOG("[copysnap] F%llu copy of %zu bytes too large to snapshot, GPU reads guest memory", (unsigned long long)dm_guest_frame(), n); return 0; }
+    size_t need = (size_t)((n + 255ull) & ~255ull);
+    if (!g_cps_buf || g_cps_off + need > g_cps_size) {
+        if (g_cps_buf) defer_obj_release(g_cps_buf);   // copies already encoded still read the old block: release when this submission completes
+        g_cps_size = MAX((size_t)1 << 20, need);
+        g_cps_buf = [g_dev newBufferWithLength:g_cps_size options:MTLResourceStorageModeShared];
+        if (!g_cps_buf) MDIE("copy snapshot ring allocation failed %#zx", need);
+        res_add(g_cps_buf); g_cps_off = 0; }
+    memcpy((uint8_t *)g_cps_buf.contents + g_cps_off, src, n);
+    *out = g_cps_buf; *off = g_cps_off; g_cps_off += need; g_cps_n++; g_cps_bytes += n;
+    { uint64_t f = (uint64_t)dm_guest_frame();
+      if (f % 300 == 0 && (g_cps_n % 97) < 3) MLOG("[copysnap] F%llu copies snapshotted %llu (%llu bytes), too large %llu", (unsigned long long)f, (unsigned long long)g_cps_n, (unsigned long long)g_cps_bytes, (unsigned long long)g_cps_skip); }
+    return 1;
+}
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1; if (g_npend) g_pend_kind[g_npend - 1] = 1;
     void *sb, *db; uint64_t so, dof;
@@ -887,21 +905,10 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
         g_pkw_off += need; g_pkw_n++; g_pkw_bytes += n; }
       else if (pkw_rec() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }   // not in the image: the submission is no longer faithful
       else if (pkw_rec()) { g_pkw_over = 1; g_pkw_gap_over++; } }
-    if (cps_here() && n <= (8u << 20)) {
-        size_t need = (size_t)((n + 255ull) & ~255ull);
-        if (!g_cps_buf || g_cps_off + need > g_cps_size) {
-            if (g_cps_buf) defer_obj_release(g_cps_buf);   // copies already encoded still read the old block: release when this submission completes
-            g_cps_size = MAX((size_t)1 << 20, need);
-            g_cps_buf = [g_dev newBufferWithLength:g_cps_size options:MTLResourceStorageModeShared];
-            if (!g_cps_buf) MDIE("copy snapshot ring allocation failed %#zx", need);
-            res_add(g_cps_buf); g_cps_off = 0; }
-        memcpy((uint8_t *)g_cps_buf.contents + g_cps_off, (const uint8_t *)[(__bridge id<MTLBuffer>)sb contents] + so, (size_t)n);
-        enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_cps_buf, g_cps_off, (__bridge id<MTLBuffer>)db, dof, n);
-        g_cps_off += need; g_cps_n++; g_cps_bytes += n;
-        { uint64_t f = (uint64_t)dm_guest_frame();
-          if (f % 300 == 0 && (g_cps_n % 97) < 3) MLOG("[copysnap] F%llu copies snapshotted %llu (%llu bytes), too large %llu", (unsigned long long)f, (unsigned long long)g_cps_n, (unsigned long long)g_cps_bytes, (unsigned long long)g_cps_skip); }
-        return; }
-    if (n > (8u << 20)) { if (g_cps_skip++ < 8) MLOG("[copysnap] F%llu copy of %llu bytes too large to snapshot, GPU reads guest memory", (unsigned long long)dm_guest_frame(), (unsigned long long)n); }
+    { id<MTLBuffer> sbuf = (__bridge id<MTLBuffer>)sb; size_t soff = (size_t)so;
+      if (cps_snap((const uint8_t *)sbuf.contents + so, (size_t)n, &sbuf, &soff)) {
+          enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), sbuf, soff, (__bridge id<MTLBuffer>)db, dof, n);
+          return; } }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 
