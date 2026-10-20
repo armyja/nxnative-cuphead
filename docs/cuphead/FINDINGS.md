@@ -1483,3 +1483,20 @@ Separate present-path bug found while reading the trace: `present_now` waits for
 it (`nvn_mtl.m:7574`), while the value is documented as "blit committed", not "GPU completed". The allocator
 reset can therefore race with an in-flight present command buffer. That is a real lifetime bug, but it can
 only corrupt the final blit (the drawable), not the game texture, so it is not this shard.
+
+## Round 44 addendum: the draw-time overlap check is not yet a shard detector
+
+`DM_NVN_VB_OVERLAP=1` was added: `draw()` reads the index buffer's largest index (restart sentinels skipped)
+and compares the index byte range with the bytes each bound vertex stream's vertices occupy. It reports only a
+physical overlap between the two.
+
+Two 90 s `DM_GPU_CAPTURE=2152` runs with the check did not reproduce the shard: one stopped at present 2153 and
+the render 2152/2153 frames were clean (the run's high-scoring frames were a dark transition), and the logged
+overlaps were false positives - the bytes at `di->ibuf` read back as 0xE000-0xFD00 values, not this draw's index
+list (indirect draws, or a buffer already overwritten when the draw is encoded). A ">=90 % of indices below 8192"
+plausibility filter did not remove them.
+
+The 2152 mechanism (the vertex stream's tail is the index buffer's bytes) is established from the trace, but the
+draw-time check cannot yet separate that event from the many benign or misread cases. Next: restrict it to
+direct 16-bit indexed draws (`di->ind == 0`, `itype == 1`) and log the pass/serial so the line can be joined to
+the trace's draw 861. The old trace (`cuphead-2152-old-final.gputrace`) remains the only shard ground truth.
