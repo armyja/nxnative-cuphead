@@ -5527,6 +5527,27 @@ frz_plain:;
       if (sd_on) { uint64_t f = atomic_load(&g_cur_frame); if (f != sd_frame) { sd_frame = f; sd_k = 0; }
           long k = sd_k++;
           if ((sd_a >= 0 && k >= sd_a && k <= sd_b) || (sd_c >= 0 && k >= sd_c && k <= sd_d)) return; } }
+    // Diagnostic DM_NVN_VBBOX=a-b: for every draw of frames a..b, read the position attribute of the first
+    // up to 64 vertices and print its bounding box. A draw whose bbox jumps on the corrupted frames is the
+    // one whose vertex data is wrong; nothing is skipped, so the picture stays intact.
+    { static int vb_on = -1; static long vb_a = -1, vb_b = -1;
+      if (vb_on < 0) { const char *e = getenv("DM_NVN_VBBOX"); vb_on = e && *e;
+          if (vb_on) { vb_a = atol(e); vb_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : vb_a; MLOG("DM_NVN_VBBOX: printing the position bbox of every draw of frames %ld-%ld", vb_a, vb_b); } }
+      if (vb_on) { long vf = (long)atomic_load(&g_cur_frame);
+        if (vf >= vb_a && vf <= vb_b && pr->sh[0]) { int pa = pr->sh[0]->rf.pos_attr >= 0 ? pr->sh[0]->rf.pos_attr : 0;
+          float P[64][4]; int why = 6, nv = dw ? dw->count : (di ? di->count : 0);
+          p_draw dwc; p_draw_idx dic;
+          if (dw) { dwc = *dw; if (dwc.count > 64) dwc.count = 64; why = attr_read(pa, &dwc, NULL, P); }
+          else if (di) { dic = *di; if (dic.count > 64) dic.count = 64; why = attr_read(pa, NULL, &dic, P); }
+          if (why) fprintf(stderr, "[vbbox] F%ld d%ld vc=%d why=%d a=%d key=%s\n", vf, (long)g_stat_draw - 1, nv, why, pa, pr->sh[0]->key);
+          else { float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f}; int nn = 0, bad = 0;
+            int m = nv < 64 ? nv : 64;
+            for (int k2 = 0; k2 < m; k2++) for (int c = 0; c < 3; c++) { float v = P[k2][c];
+              if (!isfinite(v) || v > 1e6f || v < -1e6f) bad++;
+              if (isfinite(v)) { if (v < lo[c]) lo[c] = v; if (v > hi[c]) hi[c] = v; } }
+            if (!isfinite(lo[0])) nn = 1;
+            fprintf(stderr, "[vbbox] F%ld d%ld vc=%d key=%s lo=%.2f,%.2f,%.2f hi=%.2f,%.2f,%.2f bad=%d\n", vf, (long)g_stat_draw - 1, nv, pr->sh[0]->key,
+                    nn ? 0.f : lo[0], nn ? 0.f : lo[1], nn ? 0.f : lo[2], nn ? 0.f : hi[0], nn ? 0.f : hi[1], nn ? 0.f : hi[2], bad); } } } }
     { static int tg; if (!tg) { tg = 1; const char *e = getenv("DM_TEST_GHOST"); float v[8];   // Test switch DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy (normalized; press point, grid, center of the drag-follow image): turns on the drag-follow image directly without going through the front end (for Mac host screenshot verification)
         if (e && sscanf(e, "%f,%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) mtl_ui_ghost(1, v[0], v[1], &v[2], v[6], v[7]); } }
     if (dw && atomic_load(&g_ghost_on)) ghost_note(dw);
