@@ -848,10 +848,12 @@ static int g_cps_mode; static long g_cps_a = -1, g_cps_b = -1; static uint64_t g
 static int cps_env(void) {
     static int done;
     if (!done) { done = 1; const char *e = getenv("DM_NVN_COPY_SNAP");
-        if (e && *e) {
-            if (!strcmp(e, "ab")) { g_cps_mode = 2; MLOG("DM_NVN_COPY_SNAP=ab: buffer-copy sources snapshotted at encode time on a per-frame 50/50 hash schedule"); }
-            else { g_cps_mode = 1; g_cps_a = atol(e); g_cps_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : g_cps_a;
-                MLOG("DM_NVN_COPY_SNAP: frames %ld-%ld snapshot buffer-copy sources at encode time", g_cps_a, g_cps_b); } } }
+        if (!e || !*e) { g_cps_mode = 1; g_cps_a = 0; g_cps_b = LONG_MAX;
+            MLOG("DM_NVN_COPY_SNAP: default on - copy sources are snapshotted at encode time, so a small copy reads the bytes as of its position in the command stream; DM_NVN_COPY_SNAP=0 disables, ab / a-b select the old schedules"); }
+        else if (!strcmp(e, "ab")) { g_cps_mode = 2; MLOG("DM_NVN_COPY_SNAP=ab: buffer-copy sources snapshotted at encode time on a per-frame 50/50 hash schedule"); }
+        else if (!strcmp(e, "0")) { g_cps_mode = 0; MLOG("DM_NVN_COPY_SNAP=0: copy sources read from guest memory at execution (old behaviour)"); }
+        else { g_cps_mode = 1; g_cps_a = atol(e); g_cps_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : g_cps_a;
+            MLOG("DM_NVN_COPY_SNAP: frames %ld-%ld snapshot buffer-copy sources at encode time", g_cps_a, g_cps_b); } }
     return g_cps_mode;
 }
 static int cps_here(void) {
