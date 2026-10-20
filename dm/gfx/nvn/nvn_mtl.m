@@ -5628,12 +5628,14 @@ static void vb_dump_check(const p_draw_idx *di, NvProg *pr) {
     if ((long)f != want) return;
     ndump++;
     char base[1024]; snprintf(base, sizeof base, "%s/F%llu_p%llu_%d", dir.UTF8String, (unsigned long long)f, (unsigned long long)g_stat_pass, ndump);
-    FILE *m = fopen([[NSString stringWithFormat:@"%s_meta.txt", base] UTF8String], "w");
-    if (m) fprintf(m, "frame %llu pass %llu draw %d shader %s ibuf %#llx count %d itype %d base_vertex %d base_instance %d\n",
-                   (unsigned long long)f, (unsigned long long)g_stat_pass, ndump, pr && pr->sh[0] ? pr->sh[0]->key : "?",
-                   (unsigned long long)di->ibuf, di->count, di->itype, di->base_vertex, di->base_instance);
     uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
     uint64_t ilen = (uint64_t)di->count * isz; if (ilen > (2u << 20)) ilen = 2u << 20;
+    int pend = pend_hits(di->ibuf, ilen);
+    FILE *m = fopen([[NSString stringWithFormat:@"%s_meta.txt", base] UTF8String], "w");
+    if (m) fprintf(m, "frame %llu pass %llu draw %d shader %s ibuf %#llx count %d itype %d base_vertex %d base_instance %d pend %d\n",
+                   (unsigned long long)f, (unsigned long long)g_stat_pass, ndump, pr && pr->sh[0] ? pr->sh[0]->key : "?",
+                   (unsigned long long)di->ibuf, di->count, di->itype, di->base_vertex, di->base_instance, pend);
+    if (pend) MLOG("[RED] DM_NVN_DUMP: frame %llu pass %llu draw %d index buffer has a pending GPU write (CPU sees stale bytes)", (unsigned long long)f, (unsigned long long)g_stat_pass, ndump);
     void *b = NULL; uint64_t o = 0;
     long long maxix = -1;
     if (mtl_addr(di->ibuf, ilen, &b, &o)) {
