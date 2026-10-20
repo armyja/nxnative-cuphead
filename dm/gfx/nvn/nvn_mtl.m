@@ -5487,11 +5487,45 @@ frz_plain:;
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
+    // Diagnostic DM_NVN_SNAP_VB="a-b", or "ab" for a per-frame 50/50 hash schedule (which cannot alias with
+    // the artefact's cadence, unlike an every-k-frames schedule): inside the window every draw's vertex streams
+    // are copied into the frame arena at encode time and the copy is bound instead of the zero-copy guest
+    // buffer. The copy cannot change under the GPU, so the result separates "the GPU read bytes the game wrote
+    // after the draw was encoded" from "the bytes were already wrong when it was encoded". The arena is
+    // StorageModeShared and already resident: no staging blit is needed, the cost is one CPU memcpy per bound
+    // stream per draw. A stream covered by a GPU-side write earlier in this submission is left zero-copy on
+    // purpose (the CPU copy would be the pre-copy content, i.e. the snapshot would be the wrong one), and
+    // those draws are counted separately because they are the ones whose bytes the host cannot see at all.
+    uint64_t snap_gpu[16] = {0}; int snap_have[16] = {0};
+    { static int sv = -1; static long sv_a, sv_b; static int sv_ab; static uint64_t sv_copies, sv_bytes, sv_skip, sv_pend, sv_draws, sv_frames, sv_lastf = ~0ull;
+      if (sv < 0) { const char *e = getenv("DM_NVN_SNAP_VB"); sv = e && *e;
+          if (sv) { if (!strcmp(e, "ab")) { sv_ab = 1; MLOG("DM_NVN_SNAP_VB=ab: vertex streams snapshotted on a per-frame 50/50 hash schedule"); }
+              else { sv_a = atol(e); sv_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : sv_a;
+                  MLOG("DM_NVN_SNAP_VB: frames %ld-%ld bind encode-time copies of the vertex streams", sv_a, sv_b); } } }
+      if (sv) {
+        uint64_t f = atomic_load(&g_cur_frame); int here;
+        if (sv_ab) { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; here = (int)(h & 1); }
+        else here = (long)f >= sv_a && (long)f <= sv_b;
+        if (here) { if (!sv_ab || f != sv_lastf) { sv_lastf = f; sv_frames++; } sv_draws++;
+          for (int s_ = 0; s_ < 16; s_++) {
+            if (!S.vbuf[s_].address || !S.vbuf[s_].size) continue;
+            uint64_t len = S.vbuf[s_].size;
+            if (pend_hits(S.vbuf[s_].address, len)) { sv_pend++; continue; }
+            if (len > (1u << 20)) { if (sv_skip++ < 8) MLOG("[snapvb] F%llu stream %d bound size %llu exceeds 1 MB, left zero-copy", (unsigned long long)f, s_, (unsigned long long)len); continue; }
+            id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
+            memcpy((uint8_t *)ab.contents + ao, (const void *)S.vbuf[s_].address, (size_t)len);
+            snap_gpu[s_] = ab.gpuAddress + ao; snap_have[s_] = 1; sv_copies++; sv_bytes += len; } }
+        if (((f % 300) == 0) && sv_draws)
+            MLOG("[snapvb] F%llu frames in class %llu, draws %llu, stream copies %llu (%llu bytes), left zero-copy: %llu pending-write, %llu too large",
+                 (unsigned long long)f, (unsigned long long)sv_frames, (unsigned long long)sv_draws, (unsigned long long)sv_copies, (unsigned long long)sv_bytes,
+                 (unsigned long long)sv_pend, (unsigned long long)sv_skip);
+      } }
     for (int s_ = 0; s_ < 16; s_++) {
         if (!S.vbuf[s_].address) continue;
         void *mb; uint64_t mo;
         uint64_t gpu;
-        if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); watch_add(S.vbuf[s_].address, S.vbuf[s_].size); }
+        if (snap_have[s_]) { gpu = snap_gpu[s_]; enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); watch_add(S.vbuf[s_].address, S.vbuf[s_].size); }
+        else if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); watch_add(S.vbuf[s_].address, S.vbuf[s_].size); }
     }
     static id<MTLBuffer> zero; if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); }
     static uint64_t zero_gpu; if (!zero_gpu) zero_gpu = zero.gpuAddress;
