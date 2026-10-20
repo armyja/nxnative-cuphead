@@ -5569,8 +5569,46 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     return 0;
 }
 static void gpu_capture_draw(uint64_t frame);
+// DM_NVN_VB_OVERLAP=1: for indexed draws, log when the index buffer range overlaps a bound vertex stream,
+// or when the largest index is past the stream's vertex capacity. The 2152 shard: the vertex stream's tail
+// was the index buffer itself (Layout 16 at offset 0xCBA00, index at 0xCCA00, stride 24, max index 223 but
+// only ~170 vertices fit before the index buffer).
+static int vb_overlap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VB_OVERLAP"); v = e && *e && strcmp(e, "0") != 0; } return v; }
+static void vb_overlap_check(const p_draw_idx *di) {
+    if (!vb_overlap_on() || !di || !di->ibuf || di->count <= 0) return;
+    uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
+    uint64_t ilen = (uint64_t)di->count * isz, ilo = di->ibuf, ihi = ilo + ilen;
+    void *ib = NULL; uint64_t ioff = 0; int imapped = mtl_addr(ilo, ilen, &ib, &ioff);
+    long long maxix = -1;
+    if (imapped) {
+        const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + ioff;
+        for (int i = 0; i < di->count; i++) {
+            uint32_t v = isz == 1 ? p[i] : isz == 2 ? ((const uint16_t *)p)[i] : ((const uint32_t *)p)[i];
+            if ((long long)v > maxix) maxix = (long long)v;
+        }
+        maxix += di->base_vertex > 0 ? di->base_vertex : 0;
+    }
+    for (int st = 0; st < S.nstream && st < 16; st++) {
+        uint64_t vlo = S.vbuf[st].address, vsz = S.vbuf[st].size;
+        if (!vlo || !vsz) continue;
+        uint32_t stride = S.stream[st].stride;
+        uint64_t cap = stride ? vsz / stride : 0;
+        int overlap = ilo < vlo + vsz && vlo < ihi;
+        int past = imapped && maxix >= 0 && cap && (uint64_t)maxix >= cap;
+        if (!overlap && !past) continue;
+        static uint64_t logged_f = ~0ull; static int logged_st = -1;
+        uint64_t f = atomic_load(&g_cur_frame);
+        if (logged_f == f && logged_st == st) continue;
+        logged_f = f; logged_st = st;
+        MLOG("[RED] frame %llu: index buffer %#llx+%llu (%d-bit x %d, max %lld) %s vertex stream %d %#llx+%llu (stride %u, capacity %llu)",
+             (unsigned long long)f, (unsigned long long)ilo, (unsigned long long)ilen, di->itype == 0 ? 8 : di->itype == 1 ? 16 : 32,
+             di->count, maxix, overlap ? "overlaps" : "is past", st, (unsigned long long)vlo, (unsigned long long)vsz,
+             stride, (unsigned long long)cap);
+    }
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     gpu_capture_draw(atomic_load(&g_cur_frame));
+    vb_overlap_check(di);
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     if (g_nubd && g_enc && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); }   // land the deferred inline updates before this draw (see ubd_conflict)
