@@ -1422,3 +1422,21 @@ fastC 38.8/57 -> 36.5%; drainA 8.9/10 -> 29.5%): the display-link offset is a ma
 cause. The same-F comparison of fullE/safeB/fastB/fastC shows close draw counts but different player/particle
 positions; at F2100 only fullE has a shard, at F2300 only fullE has died. The shard stays run-level timing;
 the in-run A/B remains the only clean comparison, and the texture-content A/B must be in-run.
+
+## Round 43: the Metal validation layer found a real barrier bug, not the shard
+
+`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` aborted at startup on the copy encoder's intra-encoder
+barrier: `blit_barrier()` used `MTLStageAll` for `barrierAfterEncoderStages:beforeEncoderStages:` on an
+MTL4 compute encoder, whose valid encoder stages are Dispatch, Blit and AccelerationStructure. This was a
+real API misuse in the copy ordering (the same encoder that serializes the guest's buffer/upload/copy
+work; `DM_NVN_BLIT_ORDER=0` is known to bring back the fountain stripes). The barrier is now
+`Dispatch|Blit`.
+
+The fixed host runs the full 75 s validation run: 501 captures, 501 maps, no assertion and no further
+validation error. The shard rate is unchanged: 113/499 at area>=8000 (22.7 %), 81 at 12000, 68 at 15000,
+against the no-clock baseline's 124/499. So the invalid barrier was not the shard's root cause; after the
+fix the validation layer has nothing more to report, which places the remaining cause in data/execution
+rather than API usage.
+
+The next tools are the GPU frame capture (Metal debugger; MTL4 capture support to be checked) on a top
+frame (2272/2248/2243/2150), and the host-side vertex-stage texture A/B / VS clip-space output dump.

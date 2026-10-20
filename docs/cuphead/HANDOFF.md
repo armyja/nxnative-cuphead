@@ -1,5 +1,5 @@
 <!-- Cleaned copy of the working handoff; personal paths are placeholders:
-     <repo>, <cuphead-work>, <saves>. The round-40/41/42 status in ../FORK-NOTES.md supersedes the status
+     <repo>, <cuphead-work>, <saves>. The round-40/41/42/43 status in ../FORK-NOTES.md supersedes the status
      sections below. -->
 > **Round 39 audit correction (2026-10-20):** The round-38 vertex-axis exclusion below is invalid.
 > The `DM_NVN_SNAP_VB=full` draw-side parser never sets `sv=2`; it parses `full` with `atol` as a
@@ -298,3 +298,9 @@ Separate: intermittent guest deadlock at F957 (5 of 10 deterministic-clock runs)
 - Cause: the detclock ToGame alignment does not fire for Cuphead; the guest clock is seeded at the first present, so the time base (and the absolute-frame input/capture windows) shifts with the boot/loading. Next: align at Cuphead's run start and rebase input/capture.
 - Offset vs rate: no simple relation (fastB 60/99 -> 0%; fastC 38.8/57 -> 36.5%; drainA 8.9/10 -> 29.5%). Same-F fullE/F2100 shard, others clean; F2300 fullE died. Shard is run-level timing; in-run A/B still required.
 - First anchorA attempt hit the F957 deadlock; the retry passed; anchorB passed.
+
+## Round 43 (2026-10-20)
+
+- Metal validation layer (`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`) found a real MTL4 barrier misuse: the copy encoder's `blit_barrier()` used `MTLStageAll`, valid on a compute encoder only as Dispatch|Blit|AccelerationStructure. Fixed to Dispatch|Blit.
+- Fixed validation run: 501 captures/maps, no assertions or validation errors. Shard rate unchanged: 113/499 at 8000, 81 at 12000, 68 at 15000 (baseline 124/499). The barrier was not the shard root; no more API-usage errors.
+- Next: GPU frame capture at a top frame (Metal debugger; MTL4 capture support), the host-side vertex-stage texture A/B, the VS clip-space dump. F957 via lldb.

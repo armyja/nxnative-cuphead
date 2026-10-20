@@ -120,6 +120,7 @@ run** (per-frame 50/50 schedule), not a cross-run comparison. Raw numbers and re
 | GPU drain, every second frame (`DM_NVN_DRAIN=ab`) | no effect: 77/249 vs 70/250 at 8000, 55 vs 51 at 12000, 41 vs 42 at 15000. The GPU-lag/CPU-rewrite race is excluded in-run. |
 | Vertex shaders recompiled with `-fno-fast-math` (1515 VS) | inconclusive: safeB 48/37 at 8000; the fast control was 0/499 once (fastB) and 96/86 in a repeat (fastC, 39.2/33.9). The fast shaders span 0-39%; run variance dominates. Needs an in-run fast/safe switch. |
 | Input/capture anchored to the guest frame (`DM_PLAY_IN` tick, `DM_NVN_SHOT_ANCHOR=render`) | removed the replay thread's up-to-a-frame jitter and the capture-window shift, but two anchored runs still differ in 1421/4345 draw counts (33%) and 0 vs 37 shards; the guest clock/run-start anchor is still missing (the ToGame alignment does not fire for Cuphead). |
+| Metal validation layer (`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`) | caught a real MTL4 barrier misuse in the copy encoder (`MTLStageAll` on a compute encoder; valid: Dispatch\|Blit\|AccelerationStructure); fixed. The layer then runs the whole game with no assertion or validation error; the shard rate is unchanged (113/499 at 8000 vs 124/499 baseline). Not an API-usage bug. |
 | Buffer-copy source snapshotted at encode time | no effect (27/500 vs 27/498 at area >= 12000). |
 | Uniform content / inline updates / deferred updates (`DM_NVN_UB_DEFER=0`) | no effect. |
 | Binding identity, pipeline state, vertex layout, draw parameters, draw set/order, texture binding | identical on corrupted and phase-matched clean frames (0 transient hits). |
@@ -214,6 +215,24 @@ A/B must be in-run too.
 | ![anchored same-F](docs/cuphead/images/r42-anchor-same-f.jpg) | ![same-F four runs](docs/cuphead/images/r42-same-render-4runs.jpg) |
 | **Two anchored fast runs at the same render frame** - the player/effect phase differs; 1421/4345 draw counts differ, 37 vs 0 shards. | **Four earlier runs at the same render frame** - similar scenes; F2100 only fullE shards, F2300 only fullE has died. |
 
+## Round 43: the Metal validation layer found a real barrier bug, not the shard
+
+`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` aborted at startup on the copy encoder's intra-encoder barrier:
+`blit_barrier()` used `MTLStageAll` for `barrierAfterEncoderStages:beforeEncoderStages:` on an MTL4 compute
+encoder, whose valid encoder stages are Dispatch, Blit and AccelerationStructure. This was a real API misuse
+in the copy ordering (the encoder that serializes the guest's buffer/upload/copy work; `DM_NVN_BLIT_ORDER=0`
+is known to bring back the fountain stripes). The barrier is now `Dispatch|Blit`.
+
+The fixed host runs the full validation run: 501 captures, 501 maps, no assertion and no further validation
+error. The shard rate is unchanged: 113/499 at 8000 (22.7 %), 81 at 12000, 68 at 15000, against the no-clock
+baseline's 124/499. The invalid barrier was not the shard's root cause; after the fix the validation layer
+reports nothing more, which places the remaining cause in data/execution rather than API usage.
+
+| | |
+|:---:|:---:|
+| ![validation run top](docs/cuphead/images/r43-valid-top.jpg) | |
+| **Validation run (fixed barrier)** - 113/499 shards at 8000; after the copy-encoder fix the layer reports no API error. | |
+
 ## Open problems and next steps
 
 1. **Geometry shredding (main).** Every CPU-side input and its delivery is excluded; the GPU still produces
@@ -228,7 +247,9 @@ A/B must be in-run too.
      bound and whether their content changes in the frame, then design the snapshot.
    - **The draw's own encoding/execution.** Which command the GPU actually runs, argument-table contents at
      execution (excluded for the shared table), render-target aliasing and pass order. A targeted
-     immutable replay of the first anomalous draw is the fallback.
+     immutable replay of the first anomalous draw is the fallback. A Metal GPU frame capture of an
+     anomalous draw (geometry viewer, VS output, sampled textures) is the next direct look; the MTL4
+     capture support is to be checked.
    - **Fast-math / NaN amplification.** The cross-run safe-math test is inconclusive (Round 41); a valid test
      needs an in-run fast/safe vertex-shader switch, or a NaN/Inf sanitizer on the translated vertex position.
      The NaN values in unused uniform slots and the 1.7e38 vertex attributes are the motivation.
@@ -258,6 +279,7 @@ of the shredding and is recorded here because it blocks long capture runs.
 - `DM_NVN_ARG_TABLE=ab`: shared vs one private `MTL4ArgumentTable` per draw, per-frame A/B.
 - `DM_NVN_DRAIN=ab`: every second frame waits for its own submission before returning to the game.
 - `DM_NVN_SHOT_ANCHOR=render`: select captures by the guest frame instead of the screen present.
+- `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`: the Metal validation layer; aborts on API misuse (it found the copy-encoder barrier).
 - `DM_NVN_COPY_SNAP`, `DM_NVN_PENDK`, `DM_NVN_PASSDUMP`, `DM_NVN_CBDUMP`, `DM_NVN_VBBOX`, `DM_NVN_SKIP_DRAW`.
 - `[shot-map] present=N render=F`: joins a capture to the draw-side frame.
 - `DM_WINDOW_SMALL` / `DM_WINDOW_FLOAT`: a 480x270 floating capture window that does not take key focus.
