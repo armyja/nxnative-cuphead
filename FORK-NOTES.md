@@ -105,7 +105,7 @@ run** (per-frame 50/50 schedule), not a cross-run comparison. Raw numbers and re
 | FXAA skip (`DM_NVN_NOFXAA`) | the symptom moves, it does not disappear. |
 | Submissions in flight 0/1/2/unbounded | the old result was cross-run (fully synchronous 94 vs baseline 18 of 501); replaced by the in-run drain A/B below. |
 | GPU drain, every second frame (`DM_NVN_DRAIN=ab`) | no effect: 77/249 vs 70/250 at 8000, 55 vs 51 at 12000, 41 vs 42 at 15000. The GPU-lag/CPU-rewrite race is excluded in-run. |
-| Vertex shaders recompiled with `-fno-fast-math` (1515 VS) | inconclusive: safeB 48/37 at 8000, an adjacent fastB 0/499; run variance dominates. Needs an in-run fast/safe shader switch. |
+| Vertex shaders recompiled with `-fno-fast-math` (1515 VS) | inconclusive: safeB 48/37 at 8000; the fast control was 0/499 once (fastB) and 96/86 in a repeat (fastC, 39.2/33.9). The fast shaders span 0-39%; run variance dominates. Needs an in-run fast/safe switch. |
 | Buffer-copy source snapshotted at encode time | no effect (27/500 vs 27/498 at area >= 12000). |
 | Uniform content / inline updates / deferred updates (`DM_NVN_UB_DEFER=0`) | no effect. |
 | Binding identity, pipeline state, vertex layout, draw parameters, draw set/order, texture binding | identical on corrupted and phase-matched clean frames (0 transient hits). |
@@ -140,6 +140,10 @@ had **0/499 at every threshold**. A fast run can be clean, so run-level variance
 is inconclusive, not evidence. A valid test needs an in-run fast/safe vertex-shader switch; the NaN / 1.7e38
 values remain a lead, not an established cause.
 
+A repeat of the fast control (fastC, same command, offset 20-57) had 96/86 at 8000 (39.2/33.9 %), 67/67 at
+12000 and 51/54 at 15000 - higher than fullE. The fast shaders thus span 0-39 % across runs; the safeB rate is
+inside that range. The difference is run-level variance, not the math mode.
+
 The no-clock pair also repeated the scorer trap: the 124 vs 42 difference at 8000 was the death/retry transition
 (diagonal wipe and menu), not the shard; the 1900-2100 gameplay was clean in both.
 
@@ -149,6 +153,8 @@ The no-clock pair also repeated the scorer trap: the 124 vs 42 difference at 800
 | **GPU drain A/B** - top frames; both the drain and async arms still show the shard. | **Safe-math VS (safeB)** - shards persist (2145/2148, 2271/2274). |
 | ![Fast VS clean](docs/cuphead/images/r41-fastB-clean.jpg) | ![Death transition](docs/cuphead/images/r41-safeA-death-screen.jpg) |
 | **Fast VS (fastB)** - zero shards in the same route; the safe-math comparison is confounded by run variance. | **safeA no-clock** - the scorer counts the death/retry wipe; the 1900-2100 gameplay is clean. |
+| ![Fast VS repeat (fastC)](docs/cuphead/images/r41-fastC-shards.jpg) | |
+| **Fast VS repeat (fastC)** - same fast shaders and command, offset 20-57: 96/86 shards at 8000; the fastB zero was not reproducible. | |
 
 ## Open problems and next steps
 

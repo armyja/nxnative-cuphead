@@ -286,3 +286,7 @@ Separate: intermittent guest deadlock at F957 (5 of 10 deterministic-clock runs)
 - GPU drain in-run A/B (`DM_NVN_DRAIN=ab`): 8000 77/249 drain vs 70/250 async, 12000 55 vs 51, 15000 41 vs 42 - no reduction. The old cross-run "not GPU lag" is replaced by this in-run result.
 - Safe-math VS recompile (1515 VS, `-fno-fast-math`): safeB 48/37 at 8000, 25/22 at 12000, 14/17 at 15000; fastB, same route, 0/499 at every threshold. Run variance dominates; the safe-math test is inconclusive, not evidence. Needs an in-run fast/safe shader switch.
 - Measurement: the no-clock pair's 124 vs 42 at 8000 was the death/retry transition in the scorer, not the shard; the 1900-2100 gameplay was clean in both.
+
+## Round 41 addendum
+
+- fastC (fast shaders, same command): offset 20-57, 96/86 at 8000 (39.2/33.9), 67/67 at 12000, 51/54 at 15000. fastB (same shaders/command, offset 18-99) was 0/499. The fast control spans 0-39%; the safeB 48/37 is inside the range. Safe-math remains inconclusive.

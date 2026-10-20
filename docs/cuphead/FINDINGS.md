@@ -1392,3 +1392,7 @@ values in uniforms and attributes remain a lead, not an established cause.
 Measurement trap, again: the no-clock baseline/safe pair died and the area scorer counted the death/retry
 transition (diagonal wipe, menu); the 1900-2100 gameplay window was clean in both. The 42/499 vs 124/499 difference
 in that pair was the death-screen timing, not the shard. Always inspect the top frames.
+
+## Round 41 addendum: the fast control is not reproducible
+
+A repeat of the fast control (fastC; same `DM_DETCLOCK=16666667 DM_DETCLOCK_PACE=1 DM_NVN_SNAP_VB=full` command, fast vertex shaders) had a present->render offset of 20-57 and 96/86 shards at area>=8000 (39.2 % / 33.9 %), 67/67 at 12000 and 51/54 at 15000. The first fast control (fastB) had offset 18-99 and 0/499. Same shaders, same command: 0 vs 182 hot at 8000. The fast shaders span the whole range; the safeB 48/37 is inside it. The safe-math test is confounded by run-level variance and remains inconclusive; the fastB zero was a clean route, not a fix.
