@@ -1027,6 +1027,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
       if (maxinf == -2) { const char *e = getenv("DM_NVN_MAX_INFLIGHT"); maxinf = e ? atoi(e) : DM_GAME_NVN_MAX_INFLIGHT;
           if (maxinf >= 0) LOG("[nvn] DM_NVN_MAX_INFLIGHT=%d: at most %d submissions in flight (0 = fully synchronous)", maxinf, maxinf); }
       if (maxinf >= 0 && sub_fence > (uint64_t)maxinf) mtl_wait(sub_fence - (uint64_t)maxinf, UINT64_MAX); }
+    if (mtl_drain_here()) mtl_wait(sub_fence, UINT64_MAX);   // DM_NVN_DRAIN: this frame's GPU work is complete before the game writes the next frame
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);

@@ -1103,6 +1103,28 @@ static int ub_skip(const char *key) {   // Whether this phase should drop draws 
     return 0;
 }
 void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); }
+// DM_NVN_DRAIN=ab: per-frame 50/50, the frame's submission waits for its own GPU completion before returning to the
+// game, so the next frame's CPU writes cannot land in memory this frame's GPU still reads. The arm is chosen from the
+// rendered frame, the same schedule as the other in-run A/Bs; the log names the frame the wait applies to.
+int mtl_drain_here(void) {
+    static int mode = -2;
+    if (mode == -2) {
+        const char *e = getenv("DM_NVN_DRAIN");
+        mode = !e || !*e ? 0 : !strcmp(e, "ab") ? 2 : atoi(e) ? 1 : 0;
+        if (mode == 2) MLOG("DM_NVN_DRAIN=ab: every second rendered frame waits for its submission before returning to the game ([drain])");
+        else if (mode == 1) MLOG("DM_NVN_DRAIN=1: every submission is synchronous");
+    }
+    if (!mode) return 0;
+    uint64_t f = atomic_load(&g_cur_frame);
+    static uint64_t last = ~0ull; static int arm = 1;
+    if (f != last) {
+        last = f;
+        if (mode == 1) arm = 1;
+        else { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; arm = (int)(h & 1); }
+        if (mode == 2) MLOG("[drain] F%llu arm=%s", (unsigned long long)f, arm ? "drain" : "async");
+    }
+    return arm;
+}
 // GPU timing registration: gpu_tag_begin(frame) before commit, gpu_tag_done(frame, GPU start, GPU end) on completion (seconds on the CACurrentMediaTime base).
 // Old-queue command buffers go through gpu_tag_f; the Metal 4 main submission backfills in the feedback of mtl_sub_commit (when switching to Metal 4 all the call sites were lost and the GPU column of the timing line became empty)
 static void gpu_tag_begin(uint64_t f) {
