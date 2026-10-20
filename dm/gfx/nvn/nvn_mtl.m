@@ -7420,30 +7420,50 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     return 1;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
-// DM_GPU_CAPTURE=<render frame> (+ MTL_CAPTURE_ENABLED=1): write a Metal .gputrace for that frame. The capture
-// starts at the frame's first draw (the display link may skip its present) and stops at the first present at or
-// after it, so the frame's commands are inside.
-static long g_gc_want = -1; static const char *g_gc_out; static int g_gc_started;
+// DM_GPU_CAPTURE=<render frame>[,<render frame>...] (+ MTL_CAPTURE_ENABLED=1): write a Metal .gputrace for each
+// frame. A capture starts at the frame's first draw (the display link may skip its present) and stops at the
+// first present at or after it, so the frame's commands are inside; the next frame then captures separately.
+// DM_GPU_CAPTURE_OUT may contain %d (replaced with the frame); without it the name gets -<frame> appended when
+// more than one frame is requested.
+#define GC_MAX 8
+static long g_gc_want[GC_MAX]; static int g_gc_n = -1, g_gc_i; static const char *g_gc_out; static int g_gc_started;
+static void gpu_capture_init(void) {
+    g_gc_n = 0; g_gc_out = getenv("DM_GPU_CAPTURE_OUT");
+    const char *e = getenv("DM_GPU_CAPTURE");
+    if (!e || !*e) return;
+    char buf[256]; snprintf(buf, sizeof buf, "%s", e);
+    for (char *p = buf; p && *p && g_gc_n < GC_MAX; ) {
+        char *c = strchr(p, ','); if (c) *c = 0;
+        long v = atol(p);
+        if (v > 0) g_gc_want[g_gc_n++] = v;
+        p = c ? c + 1 : NULL;
+    }
+}
 static void gpu_capture_draw(uint64_t frame) {
-    if (g_gc_want < 0) { const char *e = getenv("DM_GPU_CAPTURE"); g_gc_want = e && *e ? atol(e) : 0; g_gc_out = getenv("DM_GPU_CAPTURE_OUT"); }
-    if (!g_gc_want || g_gc_started || frame != (uint64_t)g_gc_want) return;
+    if (g_gc_n < 0) gpu_capture_init();
+    while (g_gc_i < g_gc_n && frame > (uint64_t)g_gc_want[g_gc_i]) g_gc_i++;   // a frame that never rendered cannot be captured
+    if (!g_gc_n || g_gc_started || g_gc_i >= g_gc_n || frame != (uint64_t)g_gc_want[g_gc_i]) return;
     g_gc_started = 1;
     MTLCaptureManager *cm = [MTLCaptureManager sharedCaptureManager];
     MTLCaptureDescriptor *d = [MTLCaptureDescriptor new];
     d.captureObject = g_dev;
     d.destination = MTLCaptureDestinationGPUTraceDocument;
-    char path[1024]; snprintf(path, sizeof path, "%s", g_gc_out && *g_gc_out ? g_gc_out : "cuphead-frame.gputrace");
+    char path[1024];
+    if (g_gc_out && strstr(g_gc_out, "%d")) snprintf(path, sizeof path, g_gc_out, (int)frame);
+    else if (g_gc_out && g_gc_n > 1) snprintf(path, sizeof path, "%s-%ld", g_gc_out, (long)frame);
+    else snprintf(path, sizeof path, "%s", g_gc_out && *g_gc_out ? g_gc_out : "cuphead-frame.gputrace");
     d.outputURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     NSError *err = nil;
     if (![cm startCaptureWithDescriptor:d error:&err]) MLOG("[RED] GPU capture start failed: %s", err ? err.description.UTF8String : "?");
     else MLOG("GPU capture started at frame %llu draw -> %s", (unsigned long long)frame, path);
 }
 static void gpu_capture_tick(uint64_t frame) {
-    if (g_gc_started && frame >= (uint64_t)g_gc_want) {
-        g_gc_started = 0;
-        [[MTLCaptureManager sharedCaptureManager] stopCapture];
-        MLOG("GPU capture stopped at present frame %llu", (unsigned long long)frame);
-    }
+    if (g_gc_n < 0) gpu_capture_init();
+    if (!g_gc_started || g_gc_i >= g_gc_n || frame < (uint64_t)g_gc_want[g_gc_i]) return;
+    g_gc_started = 0;
+    [[MTLCaptureManager sharedCaptureManager] stopCapture];
+    MLOG("GPU capture stopped at present frame %llu (want %ld)", (unsigned long long)frame, g_gc_want[g_gc_i]);
+    g_gc_i++;
 }
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
     gpu_capture_tick(frame);
