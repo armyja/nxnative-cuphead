@@ -5575,7 +5575,9 @@ static void gpu_capture_draw(uint64_t frame);
 // only ~170 vertices fit before the index buffer).
 static int vb_overlap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_VB_OVERLAP"); v = e && *e && strcmp(e, "0") != 0; } return v; }
 static void vb_overlap_check(const p_draw_idx *di) {
-    if (!vb_overlap_on() || !di || !di->ibuf || di->count <= 0) return;
+    // Direct 16-bit indexed draws only: indirect draws take count/offset from the record and the bytes at
+    // di->ibuf are not this draw's index list, which made the check too noisy to act on.
+    if (!vb_overlap_on() || !di || di->ind || di->itype != 1 || !di->ibuf || di->count <= 0) return;
     uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
     uint64_t ilen = (uint64_t)di->count * isz, ilo = di->ibuf, ihi = ilo + ilen;
     void *ib = NULL; uint64_t ioff = 0; int imapped = mtl_addr(ilo, ilen, &ib, &ioff);
@@ -5606,8 +5608,8 @@ static void vb_overlap_check(const p_draw_idx *di) {
         uint64_t f = atomic_load(&g_cur_frame);
         if (logged_f == f) return;   // one line per frame, even when several draws/streams qualify
         logged_f = f;
-        MLOG("[RED] frame %llu: index bytes %#llx+%llu (%d-bit x %d, max %lld) overlap vertex stream %d %#llx+%llu (stride %u, used to %#llx); the vertex fetch reads index data",
-             (unsigned long long)f, (unsigned long long)ilo, (unsigned long long)ilen, di->itype == 0 ? 8 : di->itype == 1 ? 16 : 32,
+        MLOG("[RED] frame %llu pass %llu: index bytes %#llx+%llu (16-bit x %d, max %lld) overlap vertex stream %d %#llx+%llu (stride %u, used to %#llx); the vertex fetch reads index data",
+             (unsigned long long)f, (unsigned long long)g_stat_pass, (unsigned long long)ilo, (unsigned long long)ilen,
              di->count, maxix, st, (unsigned long long)vlo, (unsigned long long)vsz, stride, (unsigned long long)uhi);
         return;
     }
