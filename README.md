@@ -1,5 +1,11 @@
 # nxnative
 
+> **This fork: Cuphead (`0100A5C00D162000`) - work in progress, not playable end-to-end.**
+> It boots to the title, menu, world map and forest level at 60 fps on an M1 Mac, but some frames show
+> shredded geometry (flat triangles, tears, spikes) and a level transition occasionally deadlocks the guest.
+> See [FORK-NOTES.md](FORK-NOTES.md) for the current status, contact sheets and every attempted fix.
+> No game files, keys or extracted data are included here.
+
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
@@ -40,6 +46,15 @@ All of these are tested on an iPhone and playable:
 Being ported:
 
 - The Legend of Zelda: Tears of the Kingdom (base game + update 1.4.3): runs on an iPhone into the opening cave; the frame rate is still being worked on.
+- **Cuphead** (base game v1.0.0, `0100A5C00D162000`): boots to the title, menu, world map and forest level at 60 fps
+  on an M1 Mac; **not playable end-to-end** - some frames show shredded geometry (flat triangles, tears, spikes)
+  and a level transition occasionally deadlocks the guest. See [FORK-NOTES.md](FORK-NOTES.md) for the current
+  state, contact sheets and every attempted fix.
+
+![Cuphead, one corrupted frame](docs/cuphead/images/shard-cpF-2249.png)
+
+*Cuphead, one corrupted frame (present 2249 from an earlier run): the geometry is stretched into spikes while
+the neighbouring frames are clean. More contact sheets are in [FORK-NOTES.md](FORK-NOTES.md).*
 
 | | |
 |:---:|:---:|

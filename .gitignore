@@ -4,3 +4,24 @@
 .iosdd_*/
 .DS_Store
 __pycache__/
+
+# Game files, keys and extracted data are never committed (the game and its keys live outside the repository)
+*.nsp
+*.xci
+*.nca
+*.nro
+*.kip
+prod.keys
+keys.txt
+*.keys
+RomFS/
+romfs/
+saves/
+*.sav
+
+# Local capture / run artifacts
+run/
+save/
+shots/
+tmp/
+*.log
