@@ -775,7 +775,11 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *db; uint64_t dof;
-    if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform update target is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
+    // Same treatment as the copy path above: an address in no memory pool is guest heap the host never registered
+    // (legal on hardware). Report and drop that update instead of ending the session.
+    if (!mtl_addr(dst, n, &db, &dof)) {
+        static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropub] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
+        return; }
     int defer = enc_open() && g_nubd < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
     if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
@@ -799,7 +803,9 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (!n) return;
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *db; uint64_t dof;
-    if (!mtl_addr(dst, n, &db, &dof)) MDIE("buffer fill address is in no memory pool dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
+    if (!mtl_addr(dst, n, &db, &dof)) {
+        static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropfill] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
+        return; }
     uint8_t b0 = (uint8_t)value;
     if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
     enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
