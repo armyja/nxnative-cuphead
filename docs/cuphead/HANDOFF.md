@@ -304,3 +304,10 @@ Separate: intermittent guest deadlock at F957 (5 of 10 deterministic-clock runs)
 - Metal validation layer (`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`) found a real MTL4 barrier misuse: the copy encoder's `blit_barrier()` used `MTLStageAll`, valid on a compute encoder only as Dispatch|Blit|AccelerationStructure. Fixed to Dispatch|Blit.
 - Fixed validation run: 501 captures/maps, no assertions or validation errors. Shard rate unchanged: 113/499 at 8000, 81 at 12000, 68 at 15000 (baseline 124/499). The barrier was not the shard root; no more API-usage errors.
 - Next: GPU frame capture at a top frame (Metal debugger; MTL4 capture support), the host-side vertex-stage texture A/B, the VS clip-space dump. F957 via lldb.
+
+## Round 44 (2026-10-20)
+
+- `DM_GPU_CAPTURE=<render frame>` works on MTL4/Xcode 27.1: the capture starts at the frame's first draw and stops at the first present at or after it (the display link can skip the requested present). A 90 s `DM_GPU_CAPTURE=2152` run finalized a 2.0 GB trace (started 2152 draw, stopped present 2152) with 501 captures.
+- The 2152 trace (draw 861, indexCount 1539, UInt16) shows the vertex stream and the index buffer as two offsets of the same guest MTLBuffer: Layout 16 at `0xCBA00` (stride 24), Index at `0xCCA00`. Only 4096 bytes (170.67 vertices) fit before the index buffer; the mesh needs 224 vertices (5376 bytes) for max index 223.
+- The exported attributes are valid up to vertex ~170 and become `6.9e-39` / `(73,0,75,0)` from vertex 171, which is the index buffer's bytes read as vertex attributes. Indices >= 171 collapse to x ~ 0 and the triangles stretch: the long diagonal streaks. The shard is in `src`, not the present path.
+- Next: log the index buffer range and the vertex stream range/size at draw time to separate a wrong NVNbufferRange (stream base/offset) from a guest overwrite of the stream tail. Separately, the present allocator fence uses `g_pq_done` (advanced to `ticket-1` by the display link before `present_now`), a real present-only lifetime bug.

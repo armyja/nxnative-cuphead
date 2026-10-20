@@ -1440,3 +1440,46 @@ rather than API usage.
 
 The next tools are the GPU frame capture (Metal debugger; MTL4 capture support to be checked) on a top
 frame (2272/2248/2243/2150), and the host-side vertex-stage texture A/B / VS clip-space output dump.
+
+## Round 44: GPU frame capture, and the vertex stream reads the index buffer
+
+The Metal GPU capture works on MTL4 with Xcode 27.1. `DM_GPU_CAPTURE=<render frame>` (+ `MTL_CAPTURE_ENABLED=1`)
+writes a `.gputrace` through `MTLCaptureManager`. The display link can skip a present, so an early version that
+stopped at `frame == want` never stopped; the capture now starts at the frame's first draw and stops at the
+first present at or after it. A 90 s run with `DM_GPU_CAPTURE=2152` logged `started at frame 2152 draw` and
+`stopped at present frame 2152`, produced a finalized 2.0 GB trace and the usual 501 captures.
+
+The 2152 frame is a shard frame in that run (present 2137 / render 2152: white-green streaks over the forest,
+`DEAD` overlay). The trace's draw 861 is `drawIndexedPrimitives:Triangle indexCount:1539 indexType:UInt16
+indexBuffer:0x150936ca00 instanceCount:1 baseVertex:0 baseInstance:0`. The index buffer is valid: the first 204
+values are 223, 222, 220, 221, ... and the Geometry table's 210/212 are real indices (max in the exported
+prefix 223).
+
+The vertex data is the problem. Draw 861's Layout 16 vertex stream and its index buffer are bound at two
+offsets of the same MTLBuffer (the zero-copy guest pool):
+
+| binding | offset | stride |
+|---|---|---|
+| Buffer 16 (Layout 16, per-vertex attributes) | `0xCBA00` | 24 B |
+| Index (UInt16) | `0xCCA00` | 2 B |
+
+The two offsets differ by `0x1000` = 4096 bytes, i.e. 170.67 vertices at stride 24. The mesh needs 224
+vertices for max index 223 (224 x 24 = 5376 bytes), which is 1280 bytes (`0x500`) more than the space before
+the index buffer. The exported per-vertex attributes confirm the tail is not vertex data: vertices 0..~170
+have `m_22 = 5468.98, 155.89, 0` and `m_24 = 255,255,255,255`; from offset `0xCCA08` (vertex 171, just inside
+the index buffer) `m_22` becomes `6.9e-39` and `m_24` becomes `(73,0,75,0)` - the index bytes read as vertex
+attributes. Indices >= 171 therefore collapse to x ~ 0 and the triangles stretch across the screen: the long
+diagonal streaks. The shard is in the game's own texture (`src`), not in the present/allocator path.
+
+Two candidate causes remain, and they need to be separated by a draw-time log:
+
+1. the vertex stream's NVNbufferRange size/offset is wrong for this draw (only 4096 bytes fit before the
+   index buffer; a base of `0xCB500` would put 224 vertices exactly before `0xCCA00`); or
+2. the index buffer's write lands over the vertex stream's tail (guest memory reuse/ordering), so the tail
+   was valid when the game built it but not when the GPU fetched it.
+
+Separate present-path bug found while reading the trace: `present_now` waits for `g_pq_done` before resetting
+`g_present_alloc4[alloc_i]`, but the display-link callback advances `g_pq_done` to `ticket - 1` before calling
+it (`nvn_mtl.m:7574`), while the value is documented as "blit committed", not "GPU completed". The allocator
+reset can therefore race with an in-flight present command buffer. That is a real lifetime bug, but it can
+only corrupt the final blit (the drawable), not the game texture, so it is not this shard.

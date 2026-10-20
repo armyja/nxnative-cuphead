@@ -1,5 +1,6 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
+#import <Metal/MTLCaptureManager.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <ImageIO/ImageIO.h>
@@ -5567,7 +5568,9 @@ static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
             else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } } }
     return 0;
 }
+static void gpu_capture_draw(uint64_t frame);
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    gpu_capture_draw(atomic_load(&g_cur_frame));
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     if (g_nubd && g_enc && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); }   // land the deferred inline updates before this draw (see ubd_conflict)
@@ -7371,7 +7374,33 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     return 1;
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
+// DM_GPU_CAPTURE=<render frame> (+ MTL_CAPTURE_ENABLED=1): write a Metal .gputrace for that frame. The capture
+// starts at the frame's first draw (the display link may skip its present) and stops at the first present at or
+// after it, so the frame's commands are inside.
+static long g_gc_want = -1; static const char *g_gc_out; static int g_gc_started;
+static void gpu_capture_draw(uint64_t frame) {
+    if (g_gc_want < 0) { const char *e = getenv("DM_GPU_CAPTURE"); g_gc_want = e && *e ? atol(e) : 0; g_gc_out = getenv("DM_GPU_CAPTURE_OUT"); }
+    if (!g_gc_want || g_gc_started || frame != (uint64_t)g_gc_want) return;
+    g_gc_started = 1;
+    MTLCaptureManager *cm = [MTLCaptureManager sharedCaptureManager];
+    MTLCaptureDescriptor *d = [MTLCaptureDescriptor new];
+    d.captureObject = g_dev;
+    d.destination = MTLCaptureDestinationGPUTraceDocument;
+    char path[1024]; snprintf(path, sizeof path, "%s", g_gc_out && *g_gc_out ? g_gc_out : "cuphead-frame.gputrace");
+    d.outputURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+    NSError *err = nil;
+    if (![cm startCaptureWithDescriptor:d error:&err]) MLOG("[RED] GPU capture start failed: %s", err ? err.description.UTF8String : "?");
+    else MLOG("GPU capture started at frame %llu draw -> %s", (unsigned long long)frame, path);
+}
+static void gpu_capture_tick(uint64_t frame) {
+    if (g_gc_started && frame >= (uint64_t)g_gc_want) {
+        g_gc_started = 0;
+        [[MTLCaptureManager sharedCaptureManager] stopCapture];
+        MLOG("GPU capture stopped at present frame %llu", (unsigned long long)frame);
+    }
+}
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+    gpu_capture_tick(frame);
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (g_use != USE_OFF && g_use != USE_DONE) use_tick();
