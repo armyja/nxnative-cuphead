@@ -80,6 +80,7 @@ def main():
     fs = sorted(F)
     G = {f: groups(F[f]) for f in fs}
     stats = collections.defaultdict(lambda: [0, 0, 0, 0])
+    live = collections.defaultdict(lambda: [0, 0])   # comparisons where prev != next (the field actually moves)
     amb = tri_bad = tri_clean = 0
     cand = []
     for f in fs:
@@ -109,6 +110,8 @@ def main():
                         va, vc, vd = da['bind'][fld], dc['bind'][fld], dd['bind'][fld]
                     s = stats[fld]
                     s[j + 1] += 1
+                    if va != vd:
+                        live[fld][j // 2] += 1
                     if va == vd and vc != va:
                         s[j] += 1
                         if f in bad and len(cand) < 300:
@@ -126,9 +129,15 @@ def main():
         cr = v[2] / v[3] if v[3] else 0.0
         rows.append((br - cr, fld, v, br, cr))
     rows.sort(reverse=True)
-    print('\nPREDICATE prev == next != cur, by field (corrupted vs clean):')
+    print('\nPREDICATE prev == next != cur, by field (corrupted vs clean); "live" = how many of those\n'
+          'comparisons had prev != next at all, i.e. the field actually moves and could ever fire:')
     for dlt, fld, v, br, cr in rows[:top]:
-        print('  %-16s %5d/%-5d (%5.1f%%)  %5d/%-5d (%5.1f%%)' % (fld, v[0], v[1], 100 * br, v[2], v[3], 100 * cr))
+        print('  %-16s hits %4d/%-5d (%5.1f%%) vs %4d/%-5d (%5.1f%%)   live %d/%d'
+              % (fld, v[0], v[1], 100 * br, v[2], v[3], 100 * cr, live[fld][0], live[fld][1]))
+    dead = [r[1] for r in rows if live[r[1]][0] == 0 and live[r[1]][1] == 0]
+    print('  fields that never move in this window (no power by construction): %s' % (', '.join(dead) or 'none'))
+    moving = [r[1] for r in rows if live[r[1]][0] > 0]
+    print('  fields that move on corrupted triples but never fire: %s' % (', '.join(moving[:12]) or 'none'))
     zero = [r[1] for r in rows if r[2][0] > 0 and r[2][2] == 0]
     print('  fields with corrupted hits and zero clean hits: %s' % (', '.join(zero) or 'none'))
     print('\nfirst 12 candidate draws on corrupted frames:')
