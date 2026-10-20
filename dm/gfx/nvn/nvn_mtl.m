@@ -7491,7 +7491,7 @@ static void gpu_capture_begin(uint64_t frame, const char *path) {
     else MLOG("GPU capture started at frame %llu draw -> %s", (unsigned long long)frame, path);
 }
 static _Atomic int g_gc_click; static long g_gc_click_frame = -1;
-void mtl_capture_click(void) { atomic_store(&g_gc_click, 1); }
+void mtl_capture_click(void) { if (getenv("MTL_CAPTURE_ENABLED")) atomic_store(&g_gc_click, 1); }   // normal play: a click is only touch input
 static void gpu_capture_draw(uint64_t frame) {
     if (atomic_exchange(&g_gc_click, 0) && !g_gc_started) {
         // The click lands while the current frame is already partly drawn; capture the next full frame so the
