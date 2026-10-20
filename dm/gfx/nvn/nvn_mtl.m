@@ -712,6 +712,30 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
     return e;
 }
 
+// Diagnostic DM_NVN_COPY_SNAP: a buffer-to-buffer copy is a GPU blit that reads its source from guest memory when
+// the GPU executes it, not when the host records it. A game that rewrites the source after recording the copy therefore
+// makes the GPU copy the *next* frame's bytes into the destination - the same hazard the inline uniform-update path
+// (mtl_sub_update) already avoids by copying the payload into the host ring at encode time. This switch applies the
+// same treatment to buffer copies: the source is copied into a host ring at encode time and the blit reads the ring.
+// "a-b" = frame window, "ab" = per-frame 50/50 hash schedule so both arms run inside one run (an every-k-frames
+// schedule can alias with the artefact's 4/20/40-frame cadence).
+static id<MTLBuffer> g_cps_buf; static size_t g_cps_off, g_cps_size;
+static int g_cps_mode; static long g_cps_a = -1, g_cps_b = -1; static uint64_t g_cps_n, g_cps_bytes, g_cps_skip;
+static int cps_env(void) {
+    static int done;
+    if (!done) { done = 1; const char *e = getenv("DM_NVN_COPY_SNAP");
+        if (e && *e) {
+            if (!strcmp(e, "ab")) { g_cps_mode = 2; MLOG("DM_NVN_COPY_SNAP=ab: buffer-copy sources snapshotted at encode time on a per-frame 50/50 hash schedule"); }
+            else { g_cps_mode = 1; g_cps_a = atol(e); g_cps_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : g_cps_a;
+                MLOG("DM_NVN_COPY_SNAP: frames %ld-%ld snapshot buffer-copy sources at encode time", g_cps_a, g_cps_b); } } }
+    return g_cps_mode;
+}
+static int cps_here(void) {
+    int m = cps_env(); if (!m) return 0;
+    long f = (long)dm_guest_frame();
+    if (m == 1) return f >= g_cps_a && f <= g_cps_b;
+    uint64_t h = (uint64_t)f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; return (int)(h & 1);
+}
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *sb, *db; uint64_t so, dof;
@@ -722,6 +746,21 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropcopy] F%llu src=%#llx dst=%#llx n=%#llx\n",
                  (unsigned long long)dm_guest_frame(), (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
         return; }
+    if (cps_here() && n <= (8u << 20)) {
+        size_t need = (size_t)((n + 255ull) & ~255ull);
+        if (!g_cps_buf || g_cps_off + need > g_cps_size) {
+            if (g_cps_buf) defer_obj_release(g_cps_buf);   // copies already encoded still read the old block: release when this submission completes
+            g_cps_size = MAX((size_t)1 << 20, need);
+            g_cps_buf = [g_dev newBufferWithLength:g_cps_size options:MTLResourceStorageModeShared];
+            if (!g_cps_buf) MDIE("copy snapshot ring allocation failed %#zx", need);
+            res_add(g_cps_buf); g_cps_off = 0; }
+        memcpy((uint8_t *)g_cps_buf.contents + g_cps_off, (const uint8_t *)[(__bridge id<MTLBuffer>)sb contents] + so, (size_t)n);
+        enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_cps_buf, g_cps_off, (__bridge id<MTLBuffer>)db, dof, n);
+        g_cps_off += need; g_cps_n++; g_cps_bytes += n;
+        { uint64_t f = (uint64_t)dm_guest_frame();
+          if (f % 300 == 0 && (g_cps_n % 97) < 3) MLOG("[copysnap] F%llu copies snapshotted %llu (%llu bytes), too large %llu", (unsigned long long)f, (unsigned long long)g_cps_n, (unsigned long long)g_cps_bytes, (unsigned long long)g_cps_skip); }
+        return; }
+    if (n > (8u << 20)) { if (g_cps_skip++ < 8) MLOG("[copysnap] F%llu copy of %llu bytes too large to snapshot, GPU reads guest memory", (unsigned long long)dm_guest_frame(), (unsigned long long)n); }
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 
