@@ -63,6 +63,7 @@ static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
+static id<MTL4ArgumentTable> g_draw_vt, g_draw_ft;   // the tables this draw binds: g_vt/g_ft normally, a private pair under DM_NVN_ARG_TABLE=perdraw
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 int g_bloom_q = -1;   // Bloom 1/4 starting point (non-static: real-device same-process alternation sets it to 0 / 1 directly)
@@ -720,13 +721,58 @@ static inline void enc_r_depth_clip(id<MTL4RenderCommandEncoder> e, BOOL v) { [e
 static inline void enc_r_stencil_ref(id<MTL4RenderCommandEncoder> e, uint32_t f, uint32_t b) { (void)b; [e setStencilReferenceValue:f]; }
 static inline void enc_r_blend_color(id<MTL4RenderCommandEncoder> e, float r, float g, float b, float a) { [e setBlendColorRed:r green:g blue:b alpha:a]; }
 static inline void enc_r_visibility(id<MTL4RenderCommandEncoder> e, MTLVisibilityResultMode m, NSUInteger o) { [e setVisibilityResultMode:m offset:o]; }
-static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) { (void)e; [g_vt setAddress:gpu atIndex:i]; }
-static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) { (void)e; [(s == MTLRenderStageVertex ? g_vt : g_ft) setAddress:gpu atIndex:i]; }
+static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) { (void)e; [(g_draw_vt ? g_draw_vt : g_vt) setAddress:gpu atIndex:i]; }
+static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) { (void)e; [(s == MTLRenderStageVertex ? (g_draw_vt ? g_draw_vt : g_vt) : (g_draw_ft ? g_draw_ft : g_ft)) setAddress:gpu atIndex:i]; }
 static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
 static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
 static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, uint64_t gpu) { [e drawPrimitives:p indirectBuffer:gpu]; }
 static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
+// DM_NVN_ARG_TABLE=perdraw: one private argument-table pair per draw, bound immediately before it. The production path
+// mutates one table per stage for the whole process; if the GPU read that table at execution, an earlier draw could see a
+// later draw's addresses. A ring of pairs makes each draw's bindings immutable while it may still be in flight.
+static _Atomic uint64_t g_cur_frame;   // defined below; the per-frame argument-table arm reads it here
+static int at_mode(void) {   // 0 off, 1 perdraw, 2 per-frame A/B (shared / private)
+    static int v = -2;
+    if (v == -2) { const char *e = getenv("DM_NVN_ARG_TABLE"); v = !e ? 0 : !strcmp(e, "perdraw") ? 1 : !strcmp(e, "ab") ? 2 : 0;
+        if (v == 1) MLOG("DM_NVN_ARG_TABLE=perdraw: every draw binds a private argument-table pair");
+        else if (v == 2) MLOG("DM_NVN_ARG_TABLE=ab: shared and private argument tables alternate per rendered frame ([argtab-frame])"); }
+    return v;
+}
+static id<MTL4ArgumentTable> at_new(void) {
+    MTL4ArgumentTableDescriptor *d = [MTL4ArgumentTableDescriptor new];
+    d.maxBufferBindCount = 31; d.maxTextureBindCount = 1;
+    NSError *e = nil; id<MTL4ArgumentTable> t = [g_dev newArgumentTableWithDescriptor:d error:&e];
+    if (!t) MDIE("failed to create a per-draw argument table: %s", e.localizedDescription.UTF8String);
+    return t;
+}
+static void at_draw_begin(id<MTL4RenderCommandEncoder> en) {
+    int mode = at_mode();
+    if (!mode) { g_draw_vt = g_vt; g_draw_ft = g_ft; return; }
+    enum { AT_N = 2048 };
+    static id<MTL4ArgumentTable> vt[AT_N], ft[AT_N]; static int i, made;
+    static uint64_t af = ~0ull, draws, priv; static int aarm;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (af != f) {
+        if (af != ~0ull && mode == 2) MLOG("[argtab-frame] F%llu arm=%s draws=%llu private=%llu",
+            (unsigned long long)af, aarm ? "private" : "shared", (unsigned long long)draws, (unsigned long long)priv);
+        af = f; draws = priv = 0;
+        if (mode == 2) { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; aarm = (int)(h & 1); }
+        else aarm = 1;
+    }
+    draws++;
+    if (!aarm) {   // the production path: one shared table per stage, mutated for this draw
+        g_draw_vt = g_vt; g_draw_ft = g_ft;
+        [en setArgumentTable:g_vt atStages:MTLRenderStageVertex];
+        [en setArgumentTable:g_ft atStages:MTLRenderStageFragment];
+        return;
+    }
+    if (!made) { made = 1; for (int k = 0; k < AT_N; k++) { vt[k] = at_new(); ft[k] = at_new(); }
+        MLOG("DM_NVN_ARG_TABLE: %d private vertex + fragment argument-table pairs", AT_N); }
+    g_draw_vt = vt[i]; g_draw_ft = ft[i]; i = (i + 1) % AT_N; priv++;
+    [en setArgumentTable:g_draw_vt atStages:MTLRenderStageVertex];
+    [en setArgumentTable:g_draw_ft atStages:MTLRenderStageFragment];
+}
 static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; [e setArgumentTable:g_ct]; return e; }
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
@@ -786,6 +832,16 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 // reads the bytes as of its position in the command stream; this makes the GPU read exactly those bytes rather than relying
 // on how the driver orders the producers, so the experiment cannot be confounded by delivery.
 int snapvb_full(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SNAP_VB"); v = e && !strcmp(e, "full"); } return v; }
+// DM_NVN_SNAP_IB=ab: the same faithful post-write image for the index buffer, on its own per-frame 50/50 hash schedule.
+// 99 % of this game's index buffers are fed by buffer copies recorded earlier in the submission, so the zero-copy binding
+// may expose bytes the GPU has not produced yet. This switch only decides whether an indexed draw binds the image; the
+// write journal (g_pkw) is recorded when either image experiment is on.
+int snapib_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SNAP_IB"); v = e && !strcmp(e, "ab"); if (v) MLOG("DM_NVN_SNAP_IB=ab: post-write index images, per-frame 50/50 hash schedule; coverage in [snapib-frame]"); } return v; }
+// DM_NVN_SNAP_UB=ab: the same post-write image for every uniform block a draw binds. A uniform block is read by the
+// shader at execution; the host binds the guest address (or the deferred-update shadow), so a guest write recorded
+// after the draw but executed before its shader could still change the transform. The image is the NVN-order bytes.
+int snapub_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SNAP_UB"); v = e && !strcmp(e, "ab"); if (v) MLOG("DM_NVN_SNAP_UB=ab: post-write uniform images, per-frame 50/50 hash schedule; coverage in [snapub-frame]"); } return v; }
+static int pkw_rec(void) { return snapvb_full() || snapib_on() || snapub_on(); }
 static id<MTLBuffer> g_cps_buf; static size_t g_cps_off, g_cps_size;
 static int g_cps_mode; static long g_cps_a = -1, g_cps_b = -1; static uint64_t g_cps_n, g_cps_bytes, g_cps_skip;
 static int cps_env(void) {
@@ -813,8 +869,7 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropcopy] F%llu src=%#llx dst=%#llx n=%#llx\n",
                  (unsigned long long)dm_guest_frame(), (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
         return; }
-    { extern int snapvb_full(void);
-      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) {
+    { if (pkw_rec() && n <= (16u << 20) && g_npkw < PKW_MAX) {
         size_t need = (size_t)((n + 255ull) & ~255ull);
         if (!g_pkw_buf || g_pkw_off + need > g_pkw_size) {
             if (g_pkw_buf) defer_obj_release(g_pkw_buf);
@@ -827,8 +882,8 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
         pkw_apply(src, n, sp);   // a source written by an earlier copy / update in this submission: resolve it, do not take the stale bytes
         g_pkw[g_npkw++] = (pkw_t){dst, dst + n, src, g_pkw_off, g_pkw_buf, 0, 1};
         g_pkw_off += need; g_pkw_n++; g_pkw_bytes += n; }
-      else if (snapvb_full() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }   // not in the image: the submission is no longer faithful
-      else if (snapvb_full()) { g_pkw_over = 1; g_pkw_gap_over++; } }
+      else if (pkw_rec() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }   // not in the image: the submission is no longer faithful
+      else if (pkw_rec()) { g_pkw_over = 1; g_pkw_gap_over++; } }
     if (cps_here() && n <= (8u << 20)) {
         size_t need = (size_t)((n + 255ull) & ~255ull);
         if (!g_cps_buf || g_cps_off + need > g_cps_size) {
@@ -902,8 +957,7 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!mtl_addr(dst, n, &db, &dof)) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropub] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
         return; }
-    { extern int snapvb_full(void);
-      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) {   // the payload is command memory: keep it for the post-write image
+    { if (pkw_rec() && n <= (16u << 20) && g_npkw < PKW_MAX) {   // the payload is command memory: keep it for the post-write image
         size_t need2 = (size_t)((n + 255ull) & ~255ull);
         if (!g_pkw_buf || g_pkw_off + need2 > g_pkw_size) {
             if (g_pkw_buf) defer_obj_release(g_pkw_buf);
@@ -914,8 +968,8 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         memcpy((uint8_t *)g_pkw_buf.contents + g_pkw_off, data, (size_t)n);
         g_pkw[g_npkw++] = (pkw_t){dst, dst + n, dst, g_pkw_off, g_pkw_buf, 0, 2};
         g_pkw_off += need2; g_pkw_n++; g_pkw_bytes += n; }
-      else if (snapvb_full() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }
-      else if (snapvb_full()) { g_pkw_over = 1; g_pkw_gap_over++; } }
+      else if (pkw_rec() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }
+      else if (pkw_rec()) { g_pkw_over = 1; g_pkw_gap_over++; } }
     int defer = enc_open() && g_nubd < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
     if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
@@ -942,10 +996,9 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (!mtl_addr(dst, n, &db, &dof)) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropfill] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
         return; }
-    { extern int snapvb_full(void);
-      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) g_pkw[g_npkw++] = (pkw_t){dst, dst + n, 0, 0, nil, value, 3};
-      else if (snapvb_full() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }
-      else if (snapvb_full()) { g_pkw_over = 1; g_pkw_gap_over++; } }
+    { if (pkw_rec() && n <= (16u << 20) && g_npkw < PKW_MAX) g_pkw[g_npkw++] = (pkw_t){dst, dst + n, 0, 0, nil, value, 3};
+      else if (pkw_rec() && n > (16u << 20)) { g_pkw_over = 1; g_pkw_gap_big++; }
+      else if (pkw_rec()) { g_pkw_over = 1; g_pkw_gap_over++; } }
     uint8_t b0 = (uint8_t)value;
     if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
     enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
@@ -3554,7 +3607,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (!sh->ae) return 1;
     args_sync_dirty();
-    if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5) {
+    if (!passdump() && !g_args_dirty[nvn_stage] && !snapub_on() && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5) {   // the uniform image address is per draw: never reuse a block that carries the previous one
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);
         g_stat_args_reuse++;
         return 1;
@@ -3590,7 +3643,36 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                     FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP cannot write %s", p);
                 }
             }
-            slots[aid] = gpu;
+            uint64_t ub_gpu = gpu;
+            { static int su = -1; static uint64_t sf = ~0ull, copied, bytes, gap, diff; static int arm;
+              if (su < 0) su = snapub_on() ? 1 : 0;
+              if (su) {
+                uint64_t f = atomic_load(&g_cur_frame);
+                if (sf != f) {
+                    if (sf != ~0ull) MLOG("[snapub-frame] F%llu arm=%s copied=%llu bytes=%llu gap=%llu diff=%llu",
+                        (unsigned long long)sf, arm ? "image" : "zero", (unsigned long long)copied,
+                        (unsigned long long)bytes, (unsigned long long)gap, (unsigned long long)diff);
+                    sf = f; copied = bytes = gap = diff = 0;
+                    uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32;
+                    arm = (int)(h & 1);
+                }
+                if (arm && u->size && !(nvn_stage == 0 && reg == 0 && g_ui_moff != 0)) {
+                    uint64_t len = u->size;
+                    if (len > (4u << 20)) gap++;
+                    else if (pkw_gap()) gap++;
+                    else if (t2b_hits(u->addr, len)) gap++;
+                    else {
+                        id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
+                        uint8_t *img = (uint8_t *)ab.contents + ao;
+                        const uint8_t *g0 = (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo;
+                        memcpy(img, g0, (size_t)len);
+                        pkw_apply(u->addr, len, img);
+                        for (uint64_t k = 0; k < len; k++) diff += img[k] != g0[k];
+                        ub_gpu = ab.gpuAddress + ao; copied++; bytes += len;
+                    }
+                }
+              } }
+            slots[aid] = ub_gpu;
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
             int sid = b->kind == NVN_RB_SAMPU ? (int)(ubo_handle(nvn_stage, reg, b->off) >> 20) :
@@ -5710,6 +5792,51 @@ frz_plain:;
             snap_gpu[st] = ab.gpuAddress + ao; snap_have[st] = 1; copies++; bytes += len;
         }
       } }
+    // DM_NVN_SNAP_IB=ab: bind the index buffer as its NVN post-write image, exactly like the vertex streams above.
+    // The 8-bit / quad / fan paths expand indices on the CPU, and an indirect draw reads its arguments and indices
+    // through another path; those are not covered and are counted as gaps. Cuphead uses none of them (prim is always
+    // a triangle list and the index type is 16/32-bit). The write journal is kept for either image experiment.
+    uint64_t ib_img = 0; int ib_have = 0;
+    { static int si = -1; static uint64_t sf = ~0ull, draws, copied, bytes, applied, gap, big, journal, texture, unmapped, diff; static int arm;
+      if (si < 0) si = snapib_on() ? 1 : 0;
+      if (si && di && di->ibuf && di->count) {
+        uint64_t f = atomic_load(&g_cur_frame);
+        uint64_t len = (uint64_t)di->count * (di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1);
+        int expanded = di->itype == 0 || di->prim == 6 || di->prim == 7 || di->ind;
+        if (sf != f) {
+            if (sf != ~0ull) MLOG("[snapib-frame] F%llu arm=%s draws=%llu copied=%llu bytes=%llu applied=%llu diff=%llu gap=%llu big=%llu journal=%llu t2b=%llu unmapped=%llu",
+                (unsigned long long)sf, arm ? "image" : "zero",
+                (unsigned long long)draws, (unsigned long long)copied, (unsigned long long)bytes,
+                (unsigned long long)applied, (unsigned long long)diff, (unsigned long long)gap, (unsigned long long)big,
+                (unsigned long long)journal, (unsigned long long)texture, (unsigned long long)unmapped);
+            sf = f; draws = copied = bytes = applied = gap = big = journal = texture = unmapped = diff = 0;
+            uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32;
+            arm = (int)(h & 1);
+        }
+        draws++;
+        if (arm) {
+            if (expanded) gap++;   // CPU-expanded / indirect index paths are not covered by the image
+            else if (len > (4u << 20)) { gap++; big++; }
+            else if (pkw_gap()) { gap++; journal++; }
+            else if (t2b_hits(di->ibuf, len)) { gap++; texture++; }
+            else {
+                void *mb; uint64_t mo;
+                if (!mtl_addr(di->ibuf, len, &mb, &mo) || ![(__bridge id<MTLBuffer>)mb contents]) { gap++; unmapped++; }
+                else {
+                    id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
+                    uint8_t *img = (uint8_t *)ab.contents + ao;
+                    const uint8_t *g0 = (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo;
+                    memcpy(img, g0, (size_t)len);
+                    pkw_apply(di->ibuf, len, img);
+                    for (uint64_t k = 0; k < len; k++) diff += img[k] != g0[k];   // bytes the journal changed: 0 = this draw's index image is a no-op
+                    ib_img = ab.gpuAddress + ao; ib_have = 1;
+                    copied++; bytes += len;
+                    for (int j = 0; j < g_npkw; j++) if (di->ibuf < g_pkw[j].dst_hi && di->ibuf + len > g_pkw[j].dst_lo) { applied++; break; }
+                }
+            }
+        }
+      } }
+    if (en) at_draw_begin((id<MTL4RenderCommandEncoder>)en);
     for (int s_ = 0; s_ < 16; s_++) {
         if (!S.vbuf[s_].address) continue;
         void *mb; uint64_t mo;
@@ -5936,10 +6063,12 @@ frz_plain:;
             return;
         }
         void *mb; uint64_t mo;
-        uint64_t gpu;
-        if (!mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &gpu)) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
-        use_rec("buf", di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4), 0, NULL);
-        if (di->count) enc_r_draw_indexed(en, mp, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32, gpu, ((__bridge id<MTLBuffer>)mb).length - mo,
+        uint64_t gpu = 0;
+        uint64_t ib_len = (uint64_t)di->count * (di->itype == 1 ? 2 : 4);
+        if (!ib_have && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &gpu)) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
+        use_rec("buf", di->ibuf, ib_len, 0, NULL);
+        if (di->count) enc_r_draw_indexed(en, mp, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
+                ib_have ? ib_img : gpu, ib_have ? (NSUInteger)ib_len : ((__bridge id<MTLBuffer>)mb).length - mo,
                 di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
     }
     if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)(dw ? dw->count : di->count)); g_rt_range_pending=0; }
