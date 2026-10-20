@@ -5614,11 +5614,50 @@ static void vb_overlap_check(const p_draw_idx *di) {
         return;
     }
 }
+// DM_NVN_DUMP=<render frame>:<directory>: write the index buffer and every bound vertex stream of that
+// frame's indexed draws to small .bin files (4 MiB cap per buffer, 16 draws), plus one text header per draw.
+// The bytes are the guest memory the draw reads, so buffer analysis needs no multi-GB .gputrace.
+static void vb_dump_check(const p_draw_idx *di, NvProg *pr) {
+    static int init; static long want = -1; static NSString *dir; static int ndump; static uint64_t total;
+    if (!init) {
+        init = 1; const char *e = getenv("DM_NVN_DUMP");
+        if (e && *e) { want = atol(e); const char *c = strchr(e, ':'); if (c && c[1]) { dir = [NSString stringWithUTF8String:c + 1]; [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]; } }
+    }
+    if (want < 0 || !dir || !di || !di->ibuf || di->count <= 0 || ndump >= 64 || total > (512u << 20)) return;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if ((long)f != want) return;
+    ndump++;
+    char base[1024]; snprintf(base, sizeof base, "%s/F%llu_p%llu_%d", dir.UTF8String, (unsigned long long)f, (unsigned long long)g_stat_pass, ndump);
+    FILE *m = fopen([[NSString stringWithFormat:@"%s_meta.txt", base] UTF8String], "w");
+    if (m) fprintf(m, "frame %llu pass %llu draw %d shader %s ibuf %#llx count %d itype %d base_vertex %d base_instance %d\n",
+                   (unsigned long long)f, (unsigned long long)g_stat_pass, ndump, pr && pr->sh[0] ? pr->sh[0]->key : "?",
+                   (unsigned long long)di->ibuf, di->count, di->itype, di->base_vertex, di->base_instance);
+    uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
+    uint64_t ilen = (uint64_t)di->count * isz; if (ilen > (2u << 20)) ilen = 2u << 20;
+    void *b = NULL; uint64_t o = 0;
+    if (mtl_addr(di->ibuf, ilen, &b, &o)) {
+        FILE *fp = fopen([[NSString stringWithFormat:@"%s_ib.bin", base] UTF8String], "wb");
+        if (fp) { fwrite((uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o, 1, (size_t)ilen, fp); fclose(fp); total += ilen; }
+    }
+    for (int st = 0; st < S.nstream && st < 16; st++) {
+        uint64_t a = S.vbuf[st].address, sz = S.vbuf[st].size;
+        if (!a || !sz) continue;
+        if (sz > (2u << 20)) sz = 2u << 20;
+        b = NULL; o = 0;
+        if (!mtl_addr(a, sz, &b, &o)) continue;
+        FILE *fp = fopen([[NSString stringWithFormat:@"%s_vb%d.bin", base, st] UTF8String], "wb");
+        if (fp) { fwrite((uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o, 1, (size_t)sz, fp); fclose(fp); total += sz; }
+        if (m) fprintf(m, "vb%d addr %#llx size %llu stride %u\n", st, (unsigned long long)a, (unsigned long long)sz, S.stream[st].stride);
+    }
+    if (m) fclose(m);
+    MLOG("DM_NVN_DUMP: frame %llu pass %llu draw %d -> %s_*", (unsigned long long)f, (unsigned long long)g_stat_pass, ndump, base);
+}
 static void draw(const p_draw *dw, const p_draw_idx *di) {
     gpu_capture_draw(atomic_load(&g_cur_frame));
     vb_overlap_check(di);
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
+    vb_dump_check(di, pr);
     if (g_nubd && g_enc && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); }   // land the deferred inline updates before this draw (see ubd_conflict)
     if (g_ruler_truth == 0) {   // Ruler negative control (DM_NVN_RULER_NEG=<fragment key>): in the mode under test drop this shader's draws, and the ruler must report non-equivalence
         static const char *neg; static int ng = -1; if (ng < 0) { neg = getenv("DM_NVN_RULER_NEG"); ng = neg && *neg; }
