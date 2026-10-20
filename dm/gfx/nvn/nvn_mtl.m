@@ -5635,19 +5635,30 @@ static void vb_dump_check(const p_draw_idx *di, NvProg *pr) {
     uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
     uint64_t ilen = (uint64_t)di->count * isz; if (ilen > (2u << 20)) ilen = 2u << 20;
     void *b = NULL; uint64_t o = 0;
+    long long maxix = -1;
     if (mtl_addr(di->ibuf, ilen, &b, &o)) {
+        const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o;
+        uint32_t sentinel = isz == 1 ? 0xFF : isz == 2 ? 0xFFFF : 0xFFFFFFFFu;
+        for (int i = 0; i < di->count; i++) {
+            uint32_t v = isz == 1 ? p[i] : isz == 2 ? ((const uint16_t *)p)[i] : ((const uint32_t *)p)[i];
+            if (v != sentinel && (long long)v > maxix) maxix = (long long)v;
+        }
         FILE *fp = fopen([[NSString stringWithFormat:@"%s_ib.bin", base] UTF8String], "wb");
-        if (fp) { fwrite((uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o, 1, (size_t)ilen, fp); fclose(fp); total += ilen; }
+        if (fp) { fwrite(p, 1, (size_t)ilen, fp); fclose(fp); total += ilen; }
     }
     for (int st = 0; st < S.nstream && st < 16; st++) {
         uint64_t a = S.vbuf[st].address, sz = S.vbuf[st].size;
         if (!a || !sz) continue;
-        if (sz > (2u << 20)) sz = 2u << 20;
+        // Dump past the declared NVNbufferRange up to the last vertex the index buffer references, so the bytes
+        // the GPU actually fetches for an out-of-range index are visible (capped).
+        uint64_t need = maxix >= 0 ? (uint64_t)(maxix + 1) * S.stream[st].stride : 0;
+        if (need < sz) need = sz;
+        if (need > (2u << 20)) need = 2u << 20;
         b = NULL; o = 0;
-        if (!mtl_addr(a, sz, &b, &o)) continue;
+        if (!mtl_addr(a, need, &b, &o)) { need = sz; b = NULL; o = 0; if (!mtl_addr(a, sz, &b, &o)) continue; }
         FILE *fp = fopen([[NSString stringWithFormat:@"%s_vb%d.bin", base, st] UTF8String], "wb");
-        if (fp) { fwrite((uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o, 1, (size_t)sz, fp); fclose(fp); total += sz; }
-        if (m) fprintf(m, "vb%d addr %#llx size %llu stride %u\n", st, (unsigned long long)a, (unsigned long long)sz, S.stream[st].stride);
+        if (fp) { fwrite((uint8_t *)[(__bridge id<MTLBuffer>)b contents] + o, 1, (size_t)need, fp); fclose(fp); total += need; }
+        if (m) fprintf(m, "vb%d addr %#llx size %llu dumped %llu stride %u\n", st, (unsigned long long)a, (unsigned long long)sz, (unsigned long long)need, S.stream[st].stride);
     }
     if (m) fclose(m);
     MLOG("DM_NVN_DUMP: frame %llu pass %llu draw %d -> %s_*", (unsigned long long)f, (unsigned long long)g_stat_pass, ndump, base);
