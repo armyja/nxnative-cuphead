@@ -5617,8 +5617,14 @@ frz_plain:;
         long o = fp_k++;
         if (vf >= fp_a && vf <= fp_b) {
           char line[512]; size_t lo = 0; int nv = dw ? dw->count : (di ? di->count : 0);
-          lo += snprintf(line + lo, sizeof line - lo, "[fp] F%ld o%ld p%llu vc=%d vs=%s fs=%s", vf, o,
-                         (unsigned long long)g_stat_pass, nv, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
+          // prim / first / base vertex / base instance are draw parameters, not content: a draw whose primitive type or
+          // base vertex differs from its neighbours connects the wrong vertices, which looks like geometry stretched into
+          // spikes. They were never in the fingerprint, so record them here.
+          int fprim = dw ? dw->prim : (di ? di->prim : -1), ffirst = dw ? dw->first : 0;
+          int fbv = di ? di->base_vertex : 0, fbi = di ? di->base_instance : 0;
+          lo += snprintf(line + lo, sizeof line - lo, "[fp] F%ld o%ld p%llu vc=%d prim=%d first=%d bv=%d bi=%d vs=%s fs=%s", vf, o,
+                         (unsigned long long)g_stat_pass, nv, fprim, ffirst, fbv, fbi,
+                         pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
           for (int st = 0; st < 16 && lo < sizeof line - 40; st++) {
             if (!S.vbuf[st].address || !S.vbuf[st].size) continue;
             uint64_t stride = S.stream[st].stride; if (!stride) continue;

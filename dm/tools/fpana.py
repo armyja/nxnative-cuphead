@@ -20,7 +20,7 @@ Usage: fpana.py <log> --bad 2123,2163,2203 [--kmax 8] [--top 12] [--json out.jso
 """
 import re, sys, json, collections
 
-LINE = re.compile(r'\[fp\] F(\d+) o(\d+) p(\d+) vc=(\d+) vs=(\S+) fs=(\S+)(.*)')
+LINE = re.compile(r'\[fp\] F(\d+) o(\d+) p(\d+) (.*)')   # format-tolerant: newer records carry prim/first/bv/bi
 
 
 def parse(path):
@@ -34,12 +34,16 @@ def parse(path):
             bad_lines += 1
             continue
         vals = {}
-        for t in m.group(7).split():
+        for t in m.group(4).split():
             k, _, v = t.partition('=')
-            vals[k] = tuple(v.split('/'))
+            if k:
+                vals[k] = tuple(v.split('/'))
+        if 'vs' not in vals or 'fs' not in vals:
+            bad_lines += 1
+            continue
         frames[int(m.group(1))].append({
-            'o': int(m.group(2)), 'p': int(m.group(3)), 'vc': int(m.group(4)),
-            'gk': (m.group(5), m.group(6)), 'f': vals})
+            'o': int(m.group(2)), 'p': int(m.group(3)), 'vc': int(vals.get('vc', ('0',))[0]),
+            'gk': (vals['vs'][0], vals['fs'][0]), 'f': vals})
     return frames, bad_lines
 
 
