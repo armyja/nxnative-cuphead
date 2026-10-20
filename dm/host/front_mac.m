@@ -99,7 +99,13 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NSRect r = NSMakeRect(0, 0, 1280, 720);
+        // Capture mode (default off): DM_WINDOW_SMALL=1 opens a 480x270 window in the bottom-right corner and
+        // DM_WINDOW_FLOAT=1 keeps it above other apps without ever taking key focus or mouse events. Together with
+        // DM_PRESENT_LINK=0 this lets a capture run keep its frame rate while the machine is used for something else:
+        // an inactive app stops the CAMetalDisplayLink and a covered window is throttled (r39_fullB lost 58 s to that).
+        const char *small_env = getenv("DM_WINDOW_SMALL"), *float_env = getenv("DM_WINDOW_FLOAT");
+        int small_win = small_env && *small_env, float_win = float_env && *float_env;
+        NSRect r = small_win ? NSMakeRect(0, 0, 480, 270) : NSMakeRect(0, 0, 1280, 720);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
@@ -111,9 +117,20 @@ void front_run(void (*guest)(void)) {
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
         v.layer = g_layer;
-        [win center];
-        [win makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
+        if (small_win && NSScreen.mainScreen) {
+            NSRect vis = NSScreen.mainScreen.visibleFrame;
+            [win setFrame:NSMakeRect(NSMaxX(vis) - r.size.width - 12, NSMinY(vis) + 12, r.size.width, r.size.height) display:NO];
+        } else [win center];
+        if (float_win) {
+            win.level = NSScreenSaverWindowLevel;   // above full-screen apps as well: a covered layer stops the display link
+            win.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorStationary;
+            win.ignoresMouseEvents = YES;   // a monitor, not an input surface: input comes from DM_PLAY_IN, clicks pass through
+            [win orderFrontRegardless];     // visible above other apps without becoming key, so the guest keeps focus state 1
+            LOG("window: %.0fx%.0f floating capture window at the bottom right (no key focus, no mouse)", r.size.width, r.size.height);
+        } else {
+            [win makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+        }
         pad_init();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
