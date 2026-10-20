@@ -498,6 +498,51 @@ static vis_list *vis_snapshot(void) {
 // Target ranges of buffer writes (copies / inline uniform updates) already encoded in this submission but not yet executed on the GPU: reading these addresses on the CPU side at encode time yields old values (uv_proof avoids them when reading uniforms)
 #define PEND_MAX 256
 static uint64_t g_pend_lo[PEND_MAX], g_pend_hi[PEND_MAX]; static int g_npend, g_pend_over;
+// Kind of each pending GPU-side write: what the draw that binds the target cannot see on the CPU side. 1 = buffer copy
+// (source now snapshotted at encode time, DM_NVN_COPY_SNAP), 2 = inline uniform update (payload copied into the host ring
+// at encode time), 3 = buffer fill. Anything else shows up as 0, which would mean a GPU-side write with an unknown source
+// (the texture-to-buffer copy path records no pending write at all). Diagnostic DM_NVN_PENDK=1 prints the split per frame.
+enum { PENDK_NONE = 0, PENDK_COPY = 1, PENDK_UPDATE = 2, PENDK_FILL = 3 };
+static uint8_t g_pend_kind[PEND_MAX];
+// Texture-to-buffer copy destinations. These are NOT in g_pend_* on purpose: adding them would change behaviour elsewhere
+// (attr_read / wide_wanted test pend_hits), so they are kept separate and only used by the DM_NVN_PENDK classification.
+// They matter because such a copy produces the destination bytes on the GPU from a texture, which no encode-time snapshot of
+// the destination can reproduce.
+#define T2BK_MAX 64
+static uint64_t g_t2b_lo[T2BK_MAX], g_t2b_hi[T2BK_MAX]; static int g_nt2b;
+static int t2b_hits(uint64_t a, uint64_t n) { for (int i = 0; i < g_nt2b; i++) if (a < g_t2b_hi[i] && a + n > g_t2b_lo[i]) return 1; return 0; }
+// Post-write image of a buffer range at encode time. NVN semantics: a draw reads the bytes as of its position in the command
+// stream, i.e. after every copy / update / fill recorded before it, regardless of when the GPU executes them. This list keeps
+// those writes (with the source bytes taken at encode time, which mtl_sub_copy already does for DM_NVN_COPY_SNAP) so a vertex
+// stream can be built exactly as the shader is supposed to see it - delivery to the GPU then cannot matter. Used by
+// DM_NVN_SNAP_VB=full; bounded, and every gap is counted and reported.
+#define PKW_MAX 512
+typedef struct { uint64_t dst_lo, dst_hi, src_lo, srcoff; __unsafe_unretained id<MTLBuffer> srcbuf; uint32_t pat; uint8_t kind; } pkw_t;
+static pkw_t g_pkw[PKW_MAX]; static int g_npkw, g_pkw_over;
+static id<MTLBuffer> g_pkw_buf; static size_t g_pkw_off, g_pkw_size;
+static uint64_t g_pkw_n, g_pkw_bytes;
+// DM_NVN_PENDK=1: per frame and per *consumer* binding, which kind of GPU-side write covers it (1 buffer copy, 2 inline
+// uniform update, 3 fill, 4 texture-to-buffer copy, 0 readable). This is the table the Metal-4 review asked for: producer
+// kind -> consumer stage -> same range -> how it is ordered.
+enum { PK_VTX = 0, PK_IDX, PK_UNI_V, PK_UNI_F, PK_IND, PK_NC };
+static uint64_t g_pk_frame = ~0ull; static unsigned g_pk_n[PK_NC][5]; static unsigned g_pk_plain[PK_NC];
+static int pk_env(void) { static int v = -1; if (v < 0) { v = getenv("DM_NVN_PENDK") != NULL; if (v) MLOG("DM_NVN_PENDK=1: per-frame pending-write split by producer kind and consumer binding"); } return v; }
+static int pk_kind(uint64_t a, uint64_t n) {
+    if (g_pend_over) return -1;
+    for (int i = 0; i < g_npend; i++) if (a < g_pend_hi[i] && a + n > g_pend_lo[i]) return g_pend_kind[i];
+    return t2b_hits(a, n) ? 4 : 0; }
+static void pk_frame(uint64_t f) {
+    if (g_pk_frame == f) return;
+    if (g_pk_frame != ~0ull) {
+        fprintf(stderr, "[pendk] F%llu vtx c%u u%u f%u t%u r%u | idx c%u u%u f%u t%u r%u | uniV c%u u%u f%u t%u r%u | uniF c%u u%u f%u t%u r%u | ind c%u u%u f%u t%u r%u\n",
+                (unsigned long long)g_pk_frame,
+                g_pk_n[PK_VTX][1], g_pk_n[PK_VTX][2], g_pk_n[PK_VTX][3], g_pk_n[PK_VTX][4], g_pk_plain[PK_VTX],
+                g_pk_n[PK_IDX][1], g_pk_n[PK_IDX][2], g_pk_n[PK_IDX][3], g_pk_n[PK_IDX][4], g_pk_plain[PK_IDX],
+                g_pk_n[PK_UNI_V][1], g_pk_n[PK_UNI_V][2], g_pk_n[PK_UNI_V][3], g_pk_n[PK_UNI_V][4], g_pk_plain[PK_UNI_V],
+                g_pk_n[PK_UNI_F][1], g_pk_n[PK_UNI_F][2], g_pk_n[PK_UNI_F][3], g_pk_n[PK_UNI_F][4], g_pk_plain[PK_UNI_F],
+                g_pk_n[PK_IND][1], g_pk_n[PK_IND][2], g_pk_n[PK_IND][3], g_pk_n[PK_IND][4], g_pk_plain[PK_IND]); }
+    memset(g_pk_n, 0, sizeof g_pk_n); memset(g_pk_plain, 0, sizeof g_pk_plain); g_pk_frame = f; }
+static int pend_kind_hit(uint64_t a, uint64_t n) { if (g_pend_over) return -1; for (int i = 0; i < g_npend; i++) if (a < g_pend_hi[i] && a + n > g_pend_lo[i]) return g_pend_kind[i]; return 0; }
 static int pend_hits(uint64_t a, uint64_t n) { if (g_pend_over) return 1; for (int i = 0; i < g_npend; i++) if (a < g_pend_hi[i] && a + n > g_pend_lo[i]) return 1; return 0; }
 typedef struct { uint64_t ser; uint16_t level, slice; } zskip_zero;
 static zskip_zero g_zskip_zero[4096]; static int g_zskip_n, g_zskip_count;
@@ -561,7 +606,7 @@ void mtl_sub_begin(void) {
     g_commit_blocks = [NSMutableArray array];
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
-    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0;
+    g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; g_npend = 0; g_pend_over = 0; g_nt2b = 0; g_npkw = 0; g_pkw_over = 0;
     zskip_clear(); g_zskip_count = 0;
     int pick = -1;
     for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
@@ -719,6 +764,11 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
 // same treatment to buffer copies: the source is copied into a host ring at encode time and the blit reads the ring.
 // "a-b" = frame window, "ab" = per-frame 50/50 hash schedule so both arms run inside one run (an every-k-frames
 // schedule can alias with the artefact's 4/20/40-frame cadence).
+// DM_NVN_SNAP_VB=full: every bound vertex stream is handed to the GPU as its post-write image, built on the CPU from the
+// bytes at encode time plus every copy / fill recorded earlier in the same submission (see g_pkw). NVN semantics say a draw
+// reads the bytes as of its position in the command stream; this makes the GPU read exactly those bytes rather than relying
+// on how the driver orders the producers, so the experiment cannot be confounded by delivery.
+int snapvb_full(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SNAP_VB"); v = e && !strcmp(e, "full"); } return v; }
 static id<MTLBuffer> g_cps_buf; static size_t g_cps_off, g_cps_size;
 static int g_cps_mode; static long g_cps_a = -1, g_cps_b = -1; static uint64_t g_cps_n, g_cps_bytes, g_cps_skip;
 static int cps_env(void) {
@@ -737,7 +787,7 @@ static int cps_here(void) {
     uint64_t h = (uint64_t)f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; return (int)(h & 1);
 }
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
-    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
+    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1; if (g_npend) g_pend_kind[g_npend - 1] = 1;
     void *sb, *db; uint64_t so, dof;
     // An address outside every memory pool means the game copies from/to memory the host does not know (a pool it
     // already finalized, or a range it never registered). Dying here ended whole sessions over one copy, so report the
@@ -746,6 +796,18 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropcopy] F%llu src=%#llx dst=%#llx n=%#llx\n",
                  (unsigned long long)dm_guest_frame(), (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
         return; }
+    { extern int snapvb_full(void);
+      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) {
+        size_t need = (size_t)((n + 255ull) & ~255ull);
+        if (!g_pkw_buf || g_pkw_off + need > g_pkw_size) {
+            if (g_pkw_buf) defer_obj_release(g_pkw_buf);
+            g_pkw_size = MAX((size_t)4 << 20, need);
+            g_pkw_buf = [g_dev newBufferWithLength:g_pkw_size options:MTLResourceStorageModeShared];
+            if (!g_pkw_buf) MDIE("post-write image ring allocation failed %#zx", need);
+            res_add(g_pkw_buf); g_pkw_off = 0; }
+        memcpy((uint8_t *)g_pkw_buf.contents + g_pkw_off, (const uint8_t *)[(__bridge id<MTLBuffer>)sb contents] + so, (size_t)n);
+        g_pkw[g_npkw++] = (pkw_t){dst, dst + n, src, g_pkw_off, g_pkw_buf, 0, 1};
+        g_pkw_off += need; g_pkw_n++; g_pkw_bytes += n; } }
     if (cps_here() && n <= (8u << 20)) {
         size_t need = (size_t)((n + 255ull) & ~255ull);
         if (!g_cps_buf || g_cps_off + need > g_cps_size) {
@@ -812,7 +874,7 @@ static void ubd_read(uint64_t lo, size_t n, void *out) {
 }
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
-    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
+    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1; if (g_npend) g_pend_kind[g_npend - 1] = 2;
     void *db; uint64_t dof;
     // Same treatment as the copy path above: an address in no memory pool is guest heap the host never registered
     // (legal on hardware). Report and drop that update instead of ending the session.
@@ -840,11 +902,13 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
 // In-order buffer fill within the submission: all four bytes equal → fillBuffer; otherwise copied in chunks from a 64 KiB pattern buffer
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (!n) return;
-    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
+    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1; if (g_npend) g_pend_kind[g_npend - 1] = 3;
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropfill] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
         return; }
+    { extern int snapvb_full(void);
+      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) g_pkw[g_npkw++] = (pkw_t){dst, dst + n, 0, 0, nil, value, 3}; }
     uint8_t b0 = (uint8_t)value;
     if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
     enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
@@ -5535,29 +5599,71 @@ frz_plain:;
     // stream per draw. A stream covered by a GPU-side write earlier in this submission is left zero-copy on
     // purpose (the CPU copy would be the pre-copy content, i.e. the snapshot would be the wrong one), and
     // those draws are counted separately because they are the ones whose bytes the host cannot see at all.
+    // Diagnostic DM_NVN_PENDK=1: classify what feeds each consumer binding of this draw (see pk_frame). A vertex stream fed
+    // by a texture-to-buffer copy (t) is the case no encode-time snapshot can reproduce; one fed by a fill (f) or by an
+    // untracked write cannot come from the CPU's view either.
+    if (pk_env()) {
+        pk_frame(dm_guest_frame());
+        for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && S.vbuf[s_].size) {
+            int k = pk_kind(S.vbuf[s_].address, S.vbuf[s_].size);
+            if (k < 0) k = 0; else if (k > 4) k = 0;
+            if (k) g_pk_n[PK_VTX][k]++; else g_pk_plain[PK_VTX]++; }
+        if (di && di->ibuf && di->count) {
+            int k = pk_kind(di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4));
+            if (k < 0) k = 0; else if (k > 4) k = 0;
+            if (k) g_pk_n[PK_IDX][k]++; else g_pk_plain[PK_IDX]++; }
+        uint64_t ind = dw ? dw->ind : di ? di->ind : 0;
+        if (ind) { int k = pk_kind(ind, 32); if (k < 0) k = 0; else if (k > 4) k = 0;
+            if (k) g_pk_n[PK_IND][k]++; else g_pk_plain[PK_IND]++; }
+        for (int st = 0; pr && st < 2; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+            for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *rb = &sh->rf.b[i]; if (rb->reg >= 16) continue;
+                if (rb->kind != NVN_RB_CBUF) continue;
+                const p_bind_buf *u = &S.ubo[st][rb->reg];
+                if (!u->addr || !u->size) continue;
+                int k = pk_kind(u->addr, u->size); if (k < 0) k = 0; else if (k > 4) k = 0;
+                int who = st == 0 ? PK_UNI_V : PK_UNI_F;
+                if (k) g_pk_n[who][k]++; else g_pk_plain[who]++; } } }
     uint64_t snap_gpu[16] = {0}; int snap_have[16] = {0};
-    { static int sv = -1; static long sv_a, sv_b; static int sv_ab; static uint64_t sv_copies, sv_bytes, sv_skip, sv_pend, sv_draws, sv_frames, sv_lastf = ~0ull;
+    { static int sv = -1; static long sv_a, sv_b; static int sv_ab; static uint64_t sv_copies, sv_bytes, sv_skip, sv_pend, sv_draws, sv_frames, sv_lastf = ~0ull, sv_applied, sv_gap;
       if (sv < 0) { const char *e = getenv("DM_NVN_SNAP_VB"); sv = e && *e;
           if (sv) { if (!strcmp(e, "ab")) { sv_ab = 1; MLOG("DM_NVN_SNAP_VB=ab: vertex streams snapshotted on a per-frame 50/50 hash schedule"); }
               else { sv_a = atol(e); sv_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : sv_a;
                   MLOG("DM_NVN_SNAP_VB: frames %ld-%ld bind encode-time copies of the vertex streams", sv_a, sv_b); } } }
       if (sv) {
         uint64_t f = atomic_load(&g_cur_frame); int here;
-        if (sv_ab) { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; here = (int)(h & 1); }
+        if (sv == 2) { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; here = (int)(h & 1); }   // "full": per-frame 50/50 hash schedule, so the image arm and the zero-copy arm live in one run
+        else if (sv_ab) { uint64_t h = f * 0x9e3779b97f4a7c15ull; h ^= h >> 29; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 32; here = (int)(h & 1); }
         else here = (long)f >= sv_a && (long)f <= sv_b;
         if (here) { if (!sv_ab || f != sv_lastf) { sv_lastf = f; sv_frames++; } sv_draws++;
           for (int s_ = 0; s_ < 16; s_++) {
             if (!S.vbuf[s_].address || !S.vbuf[s_].size) continue;
             uint64_t len = S.vbuf[s_].size;
+            if (sv == 2) {   // "full": build the post-write image (no pend_hits skip: the image already includes those writes)
+                if (len > (16u << 20)) { if (sv_skip++ < 8) MLOG("[snapvb] F%llu stream %d bound size %llu exceeds 16 MB, left zero-copy", (unsigned long long)f, s_, (unsigned long long)len); continue; }
+                id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
+                uint8_t *img = (uint8_t *)ab.contents + ao;
+                memcpy(img, (const void *)S.vbuf[s_].address, (size_t)len);
+                unsigned applied = 0;
+                for (int i = 0; i < g_npkw; i++) { const pkw_t *e = &g_pkw[i];
+                    uint64_t a = e->dst_lo > S.vbuf[s_].address ? e->dst_lo : S.vbuf[s_].address;
+                    uint64_t b = e->dst_hi < S.vbuf[s_].address + len ? e->dst_hi : S.vbuf[s_].address + len;
+                    if (a >= b) continue;
+                    if (e->kind == 1) memcpy(img + (a - S.vbuf[s_].address), (const uint8_t *)e->srcbuf.contents + e->srcoff + (a - e->dst_lo), (size_t)(b - a));
+                    else { uint8_t pat[4]; memcpy(pat, &e->pat, 4); for (uint64_t k = a; k < b; k++) img[k - S.vbuf[s_].address] = pat[(k - e->dst_lo) & 3]; }
+                    applied++; }
+                snap_gpu[s_] = ab.gpuAddress + ao; snap_have[s_] = 1; sv_copies++; sv_bytes += len;
+                if (applied) sv_applied++;
+                if (g_pkw_over) sv_gap++;
+                continue; }
             if (pend_hits(S.vbuf[s_].address, len)) { sv_pend++; continue; }
             if (len > (1u << 20)) { if (sv_skip++ < 8) MLOG("[snapvb] F%llu stream %d bound size %llu exceeds 1 MB, left zero-copy", (unsigned long long)f, s_, (unsigned long long)len); continue; }
             id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
             memcpy((uint8_t *)ab.contents + ao, (const void *)S.vbuf[s_].address, (size_t)len);
             snap_gpu[s_] = ab.gpuAddress + ao; snap_have[s_] = 1; sv_copies++; sv_bytes += len; } }
         if (((f % 300) == 0) && sv_draws)
-            MLOG("[snapvb] F%llu frames in class %llu, draws %llu, stream copies %llu (%llu bytes), left zero-copy: %llu pending-write, %llu too large",
+            MLOG("[snapvb] F%llu frames in class %llu, draws %llu, image copies %llu (%llu bytes), with pending writes applied %llu, gaps %llu, left zero-copy %llu pending / %llu too large",
                  (unsigned long long)f, (unsigned long long)sv_frames, (unsigned long long)sv_draws, (unsigned long long)sv_copies, (unsigned long long)sv_bytes,
-                 (unsigned long long)sv_pend, (unsigned long long)sv_skip);
+                 (unsigned long long)sv_applied, (unsigned long long)sv_gap, (unsigned long long)sv_pend, (unsigned long long)sv_skip);
       } }
     for (int s_ = 0; s_ < 16; s_++) {
         if (!S.vbuf[s_].address) continue;
@@ -5924,6 +6030,7 @@ static void copy_t2b(const p_copy_b2t *c) {
     size_t row = S.copy_stride ? (size_t)S.copy_stride : (size_t)((c->r.width + bw - 1) / bw) * bpb;
     size_t rows = (c->r.height + bh - 1) / bh, img = S.copy_img_stride ? (size_t)S.copy_img_stride : row * rows;   // per layer: SetCopyImageStride, else tightly packed
     int is3d = c->tex->d.target == 2, nz = c->r.depth ? c->r.depth : 1;
+    if (g_nt2b < T2BK_MAX && c->src && img * nz) { g_t2b_lo[g_nt2b] = c->src; g_t2b_hi[g_nt2b++] = c->src + img * nz; }
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
     id<MTL4ComputeCommandEncoder> b = blit();
