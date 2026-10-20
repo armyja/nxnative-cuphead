@@ -5579,18 +5579,22 @@ static void vb_overlap_check(const p_draw_idx *di) {
     uint64_t isz = di->itype == 1 ? 2 : di->itype == 2 ? 4 : 1;
     uint64_t ilen = (uint64_t)di->count * isz, ilo = di->ibuf, ihi = ilo + ilen;
     void *ib = NULL; uint64_t ioff = 0; int imapped = mtl_addr(ilo, ilen, &ib, &ioff);
-    long long maxix = -1;
+    long long maxix = -1; int non_sentinel = 0, plausible = 0;
     if (imapped) {
         const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + ioff;
         uint32_t sentinel = isz == 1 ? 0xFF : isz == 2 ? 0xFFFF : 0xFFFFFFFFu;
         for (int i = 0; i < di->count; i++) {
             uint32_t v = isz == 1 ? p[i] : isz == 2 ? ((const uint16_t *)p)[i] : ((const uint32_t *)p)[i];
             if (v == sentinel) continue;   // primitive restart / padding, not a vertex reference
+            non_sentinel++;
+            if (v < 8192) plausible++;     // a real index list is mostly small vertex numbers
             if ((long long)v > maxix) maxix = (long long)v;
         }
         maxix += di->base_vertex > 0 ? di->base_vertex : 0;
     }
-    if (!imapped || maxix < 0) return;
+    // Less than 90 % plausible indices means the bytes at di->ibuf are not this draw's index list as of the
+    // encode (indirect draws / a buffer overwritten later): do not report them as a vertex-fetch overlap.
+    if (!imapped || maxix < 0 || non_sentinel < 1 || plausible * 10 < non_sentinel * 9) return;
     for (int st = 0; st < S.nstream && st < 16; st++) {
         uint64_t vlo = S.vbuf[st].address, vsz = S.vbuf[st].size;
         if (!vlo || !vsz) continue;
