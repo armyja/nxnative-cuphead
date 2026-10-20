@@ -7443,8 +7443,9 @@ static void gpu_capture_draw(uint64_t frame) {
     if (g_gc_n < 0) gpu_capture_init();
     while (g_gc_i < g_gc_n && frame > (uint64_t)g_gc_want[g_gc_i]) g_gc_i++;   // a frame that never rendered cannot be captured
     if (!g_gc_n || g_gc_started || g_gc_i >= g_gc_n || frame != (uint64_t)g_gc_want[g_gc_i]) return;
-    g_gc_started = 1;
     MTLCaptureManager *cm = [MTLCaptureManager sharedCaptureManager];
+    if (cm.isCapturing) return;   // the previous .gputrace is still being written; skip this frame (the list advances)
+    g_gc_started = 1;
     MTLCaptureDescriptor *d = [MTLCaptureDescriptor new];
     d.captureObject = g_dev;
     d.destination = MTLCaptureDestinationGPUTraceDocument;
