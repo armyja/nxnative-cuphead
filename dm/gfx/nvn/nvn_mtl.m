@@ -7422,21 +7422,39 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 // DM_GPU_CAPTURE=<render frame> (+ MTL_CAPTURE_ENABLED=1): write a Metal .gputrace for that frame. The capture
 // starts at the frame's first draw (the display link may skip its present) and stops at the first present at or
-// after it, so the frame's commands are inside.
+// after it, so the frame's commands are inside. A left click in the game window (front_mac.m mtl_capture_click)
+// arms the same capture at the next draw, with the frame appended to DM_GPU_CAPTURE_OUT (or %d substituted).
 static long g_gc_want = -1; static const char *g_gc_out; static int g_gc_started;
-static void gpu_capture_draw(uint64_t frame) {
-    if (g_gc_want < 0) { const char *e = getenv("DM_GPU_CAPTURE"); g_gc_want = e && *e ? atol(e) : 0; g_gc_out = getenv("DM_GPU_CAPTURE_OUT"); }
-    if (!g_gc_want || g_gc_started || frame != (uint64_t)g_gc_want) return;
+static void gpu_capture_begin(uint64_t frame, const char *path) {
     g_gc_started = 1;
     MTLCaptureManager *cm = [MTLCaptureManager sharedCaptureManager];
     MTLCaptureDescriptor *d = [MTLCaptureDescriptor new];
     d.captureObject = g_dev;
     d.destination = MTLCaptureDestinationGPUTraceDocument;
-    char path[1024]; snprintf(path, sizeof path, "%s", g_gc_out && *g_gc_out ? g_gc_out : "cuphead-frame.gputrace");
     d.outputURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
     NSError *err = nil;
     if (![cm startCaptureWithDescriptor:d error:&err]) MLOG("[RED] GPU capture start failed: %s", err ? err.description.UTF8String : "?");
     else MLOG("GPU capture started at frame %llu draw -> %s", (unsigned long long)frame, path);
+}
+static _Atomic int g_gc_click;
+void mtl_capture_click(void) { atomic_store(&g_gc_click, 1); }
+static void gpu_capture_draw(uint64_t frame) {
+    if (atomic_exchange(&g_gc_click, 0)) {   // left click in the game window: capture this frame
+        if (g_gc_started) return;
+        const char *o = getenv("DM_GPU_CAPTURE_OUT");
+        char path[1024];
+        if (o && strstr(o, "%d")) snprintf(path, sizeof path, o, (int)frame);
+        else if (o && *o) snprintf(path, sizeof path, "%s-%llu", o, (unsigned long long)frame);
+        else snprintf(path, sizeof path, "%s/cuphead-click-%llu.gputrace", getenv("HOME") ? getenv("HOME") : "/tmp", (unsigned long long)frame);
+        g_gc_want = (long)frame;
+        MLOG("GPU capture armed by left click at frame %llu -> %s", (unsigned long long)frame, path);
+        gpu_capture_begin(frame, path);
+        return;
+    }
+    if (g_gc_want < 0) { const char *e = getenv("DM_GPU_CAPTURE"); g_gc_want = e && *e ? atol(e) : 0; g_gc_out = getenv("DM_GPU_CAPTURE_OUT"); }
+    if (!g_gc_want || g_gc_started || frame != (uint64_t)g_gc_want) return;
+    char path[1024]; snprintf(path, sizeof path, "%s", g_gc_out && *g_gc_out ? g_gc_out : "cuphead-frame.gputrace");
+    gpu_capture_begin(frame, path);
 }
 static void gpu_capture_tick(uint64_t frame) {
     if (g_gc_started && frame >= (uint64_t)g_gc_want) {

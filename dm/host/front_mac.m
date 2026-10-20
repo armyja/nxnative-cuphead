@@ -141,6 +141,7 @@ void front_run(void (*guest)(void)) {
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
             if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return nil; }
+            if (e.type == NSEventTypeLeftMouseDown) mtl_capture_click();   // left click in the game window arms one GPU capture at the next draw
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;
             if (sz.width <= 0 || sz.height <= 0) return e;
             dm_touch t = {0, (float)(p.x / sz.width), (float)(1.0 - p.y / sz.height)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
