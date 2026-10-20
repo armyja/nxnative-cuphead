@@ -4,18 +4,20 @@ This is a fork of [nxnative](https://github.com/seedds/nxnative) (MIT) for **Cup
 (`0100A5C00D162000`, Unity 2017.4.9f1 / IL2CPP / NVN SDK 5.5.0.0) on Apple Silicon macOS.
 
 **Status: work in progress; not playable end-to-end.** The game boots, reaches the title, menu, world map
-and the forest level at 60 fps with audio and input. Two defects remain:
+and the forest level at 60 fps with audio and input. Two defects were tracked; one is fixed:
 
-1. **Geometry shredding.** Some frames show large flat-coloured triangles, horizontal tears or stretched
-   spikes, with clean frames on both sides. The rate is 2-30 % of frames depending on the run and the save
-   snapshot; the cadence is 4, 20 or 40 frames, and the phase moves inside a run.
-2. **An intermittent guest deadlock at frame ~957.** 5 of 10 deterministic-clock runs stopped there: the
-   guest main thread and two worker threads wait on one condition variable forever. It is independent of
-   the shredding; runs without `DM_DETCLOCK` passed.
+1. **Geometry shredding - fixed (Round 45).** Some frames showed large flat-coloured triangles, horizontal
+   tears or stretched spikes. The cause was a buffer copy whose source the guest reuses before the GPU
+   executes it: the terrain index buffer received another mesh's indices, so the draw fetched vertices past
+   its stream. Small copy sources are now snapshotted at encode time (`021c612`); three consecutive runs
+   after the fix had 0/499 corrupted frames. Upstream PR: seedds/nxnative#21.
+2. **An intermittent guest deadlock at frame ~957 - open.** 5 of 10 deterministic-clock runs stopped there:
+   the guest main thread and two worker threads wait on one condition variable forever. Runs without
+   `DM_DETCLOCK` passed.
 
-No fix is claimed. Every direction that was measured and its result is below; the raw round-by-round log
-is [docs/cuphead/FINDINGS.md](docs/cuphead/FINDINGS.md) and the working handoff is
-[docs/cuphead/HANDOFF.md](docs/cuphead/HANDOFF.md).
+The round-by-round record is [docs/cuphead/FINDINGS.md](docs/cuphead/FINDINGS.md) (the fix is Round 45) and
+the working handoff is [docs/cuphead/HANDOFF.md](docs/cuphead/HANDOFF.md). The shredding rounds below are kept
+as the record of what was excluded.
 
 Nothing from the game is in this repository except a few downscaled screenshots used to document the
 defect: no ROM/NSP/XCI, no keys, no extracted data, no patched binaries and no save files. You need your
@@ -24,13 +26,10 @@ either. Not affiliated with Nintendo or Studio MDHR.
 
 ## The two questions a reviewer asks first
 
-1. **Texture content (especially vertex-stage), in-run A/B: not done yet.** The measured texture facts are
-   *binding identity* (clean) and texture-to-buffer copies (they feed no draw); the content a draw samples has
-   never been imaged. A per-frame A/B needs a private copy of each vertex-stage texture at encode time. A
-   texture copy ends the render pass, so the snapshot has to be taken before the pass opens (or the pass
-   re-opened after it); the design is in Open problems. Nothing in the table below covers texture content.
-   It must be measured in-run: the route is not deterministic across runs until the run-start anchor exists
-   (Round 42).
+1. **Texture content (especially vertex-stage), in-run A/B: not done - and not needed (Round 45).** The
+   measured texture facts are *binding identity* (clean) and texture-to-buffer copies (they feed no draw); the
+   content a draw samples was never imaged. The shredding turned out to be a buffer-copy source reuse, fixed in
+   Round 45, so no texture A/B was required. The question stays open only as a completeness check.
 2. **"Not GPU delay", per-frame 50/50: done.** `DM_NVN_DRAIN=ab` waits for the frame's own submission on every
    second frame: 8000 77/249 (drain) vs 70/250 (async), 12000 55 vs 51, 15000 41 vs 42. No effect. This
    replaces the old cross-run `MAX_INFLIGHT` comparison (94 vs 18 of 501).
@@ -233,29 +232,50 @@ reports nothing more, which places the remaining cause in data/execution rather 
 | ![validation run top](docs/cuphead/images/r43-valid-top.jpg) | |
 | **Validation run (fixed barrier)** - 113/499 shards at 8000; after the copy-encoder fix the layer reports no API error. | |
 
+## Round 45: the shredding is fixed - a buffer-copy source reused before execution
+
+`mtl_sub_copy` encoded `enc_b_copy_buffer` straight from guest memory. The GPU reads the source when the copy
+executes; Cuphead uploads each mesh's index buffer from a staging buffer and recycles that staging buffer for
+the next mesh before the copy runs, so the copy wrote the next mesh's bytes into the destination. On frame
+2102 the terrain index buffer held another mesh's list (max index 495 against a 423-vertex stream); the
+terrain draw fetched vertices past its stream and the ground disappeared.
+
+`DM_NVN_DUMP` (per-draw index/vertex dump) showed the index buffer's tail changing between otherwise identical
+frames, with `pend 1` on every draw's index buffer: a GPU copy had not executed yet when the CPU read the
+buffer, so the earlier "index buffer overwritten" reading was the stale CPU view, not what the GPU saw. The
+failure was the copy's source.
+
+The fix snapshots sources of copies <= 8 MiB into a host ring at encode time and encodes the copy from there,
+so the GPU copies the bytes as of the copy's position in the command stream; this is what the inline uniform
+update already did. Default on, `DM_NVN_COPY_SNAP=0` restores the old path.
+
+Verification: `DM_NVN_COPY_SNAP=1900-2400` gave 2/499 at 8000, 0 at 12000/15000; with the default on, three
+consecutive 90 s runs gave 0/499 at all three thresholds, against the historical 20-40 %.
+
+Provenance: `mtl_sub_copy` is upstream (seedds f739638/50a9c65); the snapshot mechanism and its default are
+this fork's (ce87f41/bfb586c/021c612). The fix is generic and is upstream PR seedds/nxnative#21 (f3057ac,
+branch armyja:copysnap).
+
 ## Open problems and next steps
 
-1. **Geometry shredding (main).** Every CPU-side input and its delivery is excluded; the GPU still produces
-   one blown-up triangle. Two leads remain:
-   - **Run-start anchor.** The guest clock and the absolute-frame input/capture windows shift with the
-     boot/loading because the detclock ToGame hook does not fire for Cuphead; align at Cuphead's run start
-     (its own uimsg or the save/level load) and rebase the windows. Until then cross-run comparisons remain
-     invalid and texture content must be measured in-run.
-   - **Texture content, especially vertex-stage texture fetches.** It is the only data class not measured;
-     a wrong vertex texture displaces vertices. A texture image cannot simply be copied mid-pass (a copy
-     ends the render pass), so the first step is to record, per draw, which vertex-stage textures are
-     bound and whether their content changes in the frame, then design the snapshot.
-   - **The draw's own encoding/execution.** Which command the GPU actually runs, argument-table contents at
-     execution (excluded for the shared table), render-target aliasing and pass order. A targeted
-     immutable replay of the first anomalous draw is the fallback. A Metal GPU frame capture of an
-     anomalous draw (geometry viewer, VS output, sampled textures) is the next direct look; the MTL4
-     capture support is to be checked.
-   - **Fast-math / NaN amplification.** The cross-run safe-math test is inconclusive (Round 41); a valid test
-     needs an in-run fast/safe vertex-shader switch, or a NaN/Inf sanitizer on the translated vertex position.
-     The NaN values in unused uniform slots and the 1.7e38 vertex attributes are the motivation.
-2. **Frame-957 deadlock.** 5 of 10 deterministic-clock runs; the guest main thread and two workers wait on
-   one condition variable. The host's process-wide key path already fixes one lost wakeup; this looks like
-   a second instance. Workaround for capture runs: omit `DM_DETCLOCK` / `DM_DETCLOCK_PACE`.
+1. **Geometry shredding - resolved (Round 45).** Root cause: `mtl_sub_copy` encoded a GPU copy from guest
+   memory; Cuphead recycles the staging buffer for the next mesh before the GPU executes the copy, so the
+   terrain index buffer got another mesh's indices (max 495 against a 423-vertex stream) and the ground
+   disappeared. Fix: snapshot sources of copies <= 8 MiB at encode time and copy from the host ring
+   (`021c612`, `DM_NVN_COPY_SNAP=0` disables). Verified 0/499 at 8000/12000/15000 in three consecutive runs
+   (baseline 20-40 %). Generic fix, upstream PR seedds/nxnative#21.
+   The leads below were the pre-fix hypotheses and are kept for the record; none of them was needed.
+   - **Historical: run-start anchor.** The guest clock and the absolute-frame input/capture windows shift
+     with the boot/loading because the detclock ToGame hook does not fire for Cuphead; align at Cuphead's run
+     start and rebase the windows. Cross-run comparisons are still invalid without it.
+   - **Historical: texture content, especially vertex-stage texture fetches.** Not the shredding's cause.
+   - **Historical: the draw's own encoding/execution and the Metal GPU frame capture.** The capture was built
+     and used in Round 44; the cause was found in Round 45 without a draw-level answer.
+   - **Historical: fast-math / NaN amplification.** The cross-run safe-math test stayed inconclusive; not the
+     shredding's cause.
+2. **Frame-957 deadlock - open.** 5 of 10 deterministic-clock runs; the guest main thread and two workers
+   wait on one condition variable. The host's process-wide key path already fixes one lost wakeup; this looks
+   like a second instance. Workaround for capture runs: omit `DM_DETCLOCK` / `DM_DETCLOCK_PACE`.
 3. **Do not repeat the excluded directions** in the table above; they were measured with in-run A/Bs.
 
 
@@ -280,7 +300,12 @@ of the shredding and is recorded here because it blocks long capture runs.
 - `DM_NVN_DRAIN=ab`: every second frame waits for its own submission before returning to the game.
 - `DM_NVN_SHOT_ANCHOR=render`: select captures by the guest frame instead of the screen present.
 - `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1`: the Metal validation layer; aborts on API misuse (it found the copy-encoder barrier).
-- `DM_NVN_COPY_SNAP`, `DM_NVN_PENDK`, `DM_NVN_PASSDUMP`, `DM_NVN_CBDUMP`, `DM_NVN_VBBOX`, `DM_NVN_SKIP_DRAW`.
+- `DM_GPU_CAPTURE=<render frame>` (+ `MTL_CAPTURE_ENABLED=1`): a single-frame `.gputrace` (starts at the frame's first draw, stops at the first present at or after it). Keep it on APFS; the exFAT 2 TB volume and the frame-list variant produced traces Xcode could not open.
+- `DM_NVN_DUMP=<render frame>:<dir>`: per-draw index buffer and vertex streams (past the declared range up to the largest index) as small `.bin` files, with a `_meta.txt` (shader, addresses, counts, `pend`).
+- `DM_NVN_VB_OVERLAP=1`: log indexed draws whose index bytes physically overlap the bytes their vertices occupy.
+- `DM_CAPTURE_CLICK=1`: a left click in the floating window arms a capture at the next full frame.
+- `DM_NVN_COPY_SNAP=0`: disable the encode-time snapshot of small copy sources (the Round 45 fix; default on).
+- `DM_NVN_PENDK`, `DM_NVN_PASSDUMP`, `DM_NVN_CBDUMP`, `DM_NVN_VBBOX`, `DM_NVN_SKIP_DRAW`.
 - `[shot-map] present=N render=F`: joins a capture to the draw-side frame.
 - `DM_WINDOW_SMALL` / `DM_WINDOW_FLOAT`: a 480x270 floating capture window that does not take key focus.
 
