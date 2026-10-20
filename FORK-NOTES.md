@@ -34,21 +34,21 @@ either. Not affiliated with Nintendo or Studio MDHR.
    second frame: 8000 77/249 (drain) vs 70/250 (async), 12000 55 vs 51, 15000 41 vs 42. No effect. This
    replaces the old cross-run `MAX_INFLIGHT` comparison (94 vs 18 of 501).
 
-## What it looks like
+## What it looked like before the fix
 
-These are contact sheets of the highest-scoring frames from the runs named in each caption (320x180
-captures, labelled with the present number and the transient score). The defect is not subtle: one
-flat-coloured triangle with a straight edge, or the scene torn into horizontal streaks; the frames on both
-sides are clean.
+The geometry shredding (fixed in Round 45) was not subtle: one flat-coloured triangle with a straight edge, the
+scene torn into horizontal streaks, or stretched spikes, with clean frames on both sides. The two clearest
+frames from the earlier rounds:
 
 | | |
 |:---:|:---:|
-| ![Vertex-image A/B](docs/cuphead/images/r39-fullE-vertex-image.jpg) | ![Index-image A/B](docs/cuphead/images/r39-idxB-index-image.jpg) |
-| **Vertex post-write image (fullE)** - top 20 frames; binding the NVN-order vertex bytes does not change the rate. | **Index post-write image (idxB)** - top 20; the index image changes the bytes but not the defect. |
-| ![Argument-table A/B](docs/cuphead/images/r39-atB-argument-table.jpg) | ![Uniform image A/B](docs/cuphead/images/r39-ubB-uniform-image.jpg) |
-| **Per-draw vs shared argument table (atB)** - top 16; the two arms are identical. | **Uniform post-write image (ubB)** - top 12; shards persist in the image arm. |
-| ![Unmapped r39 fullA](docs/cuphead/images/r39-fullA-unmapped.jpg) | ![Not shards](docs/cuphead/images/r39-fullC-particles-not-shards.jpg) |
-| **r39 fullA** - the run whose captures were joined by filename; the numbers are invalid, the picture shows the defect. | **fullC** - high transient scores but clean particle effects; the scorer alone cannot classify a shard. |
+| ![cpF 2249](docs/cuphead/images/shard-cpF-2249.png) | ![fp2 2123](docs/cuphead/images/shard-fp2-2123.png) |
+| **cpF present 2249**: stretched spikes and a pale sheet. | **fp2 present 2123**: horizontal tearing. |
+
+The r39 A/B contact sheets that used to be here documented the excluded hypotheses (vertex/index/uniform
+post-write images, the argument-table A/B, the run whose captures were joined by filename, the particles that
+scored as shards). Their numbers and conclusions are in the rounds below and in
+[docs/cuphead/FINDINGS.md](docs/cuphead/FINDINGS.md).
 
 The clearest single frames from the earlier rounds:
 
