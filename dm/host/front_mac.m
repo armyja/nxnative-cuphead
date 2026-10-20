@@ -105,6 +105,8 @@ void front_run(void (*guest)(void)) {
         // an inactive app stops the CAMetalDisplayLink and a covered window is throttled (r39_fullB lost 58 s to that).
         const char *small_env = getenv("DM_WINDOW_SMALL"), *float_env = getenv("DM_WINDOW_FLOAT");
         int small_win = small_env && *small_env, float_win = float_env && *float_env;
+        const char *click_env = getenv("DM_CAPTURE_CLICK");
+        int capture_click = click_env && *click_env;   // let the floating window take a left click for a GPU capture
         NSRect r = small_win ? NSMakeRect(0, 0, 480, 270) : NSMakeRect(0, 0, 1280, 720);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
@@ -124,9 +126,10 @@ void front_run(void (*guest)(void)) {
         if (float_win) {
             win.level = NSScreenSaverWindowLevel;   // above full-screen apps as well: a covered layer stops the display link
             win.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorStationary;
-            win.ignoresMouseEvents = YES;   // a monitor, not an input surface: input comes from DM_PLAY_IN, clicks pass through
+            win.ignoresMouseEvents = capture_click ? NO : YES;   // DM_CAPTURE_CLICK=1: the window takes a left click that arms a GPU capture; otherwise clicks pass through
             [win orderFrontRegardless];     // visible above other apps without becoming key, so the guest keeps focus state 1
-            LOG("window: %.0fx%.0f floating capture window at the bottom right (no key focus, no mouse)", r.size.width, r.size.height);
+            LOG("window: %.0fx%.0f floating capture window at the bottom right (no key focus, %s)", r.size.width, r.size.height,
+                capture_click ? "left click arms a GPU capture" : "no mouse");
         } else {
             [win makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];
