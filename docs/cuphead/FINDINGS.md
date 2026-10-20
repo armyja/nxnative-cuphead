@@ -1500,3 +1500,46 @@ The 2152 mechanism (the vertex stream's tail is the index buffer's bytes) is est
 draw-time check cannot yet separate that event from the many benign or misread cases. Next: restrict it to
 direct 16-bit indexed draws (`di->ind == 0`, `itype == 1`) and log the pass/serial so the line can be joined to
 the trace's draw 861. The old trace (`cuphead-2152-old-final.gputrace`) remains the only shard ground truth.
+
+## Round 45: the shard is a buffer-copy source reuse race (fixed)
+
+Round 44's "index buffer overwritten" reading was a stale CPU view. The shard is a buffer copy whose source the
+guest reuses before the GPU executes it. `mtl_sub_copy` encodes `enc_b_copy_buffer` straight from guest memory;
+the GPU reads the source at execution, but Cuphead uploads each mesh's index buffer from a staging buffer and
+recycles that staging buffer for the next mesh before the copy runs. The copy then writes the next mesh's bytes
+into the destination. On frame 2102 the terrain index buffer received another mesh's index list (max index 495
+against a 423-vertex stream); the terrain draw fetched vertices past its stream (non-vertex bytes there, denormal
+floats), and the ground disappeared.
+
+Evidence:
+
+- `DM_NVN_DUMP=2102:<dir>` (new per-draw index/vertex dump) at frame 2102: the terrain draw (pass 33776, 1788
+  indices, 423-vertex stream) had 207 indices >= 423 in the CPU view, byte-identical to the clean run for the
+  first 1372 indices and a different list after that. Every draw in that frame reported `pend 1`: a GPU copy
+  writes the index buffer in the same submission, so the CPU bytes are the state before the copy.
+- The CPU view is not the GPU view, so the "overwritten" tail was the pre-copy state; the failure is the copy
+  source, not the destination.
+- `DM_NVN_COPY_SNAP=1900-2400` (snapshot copy sources at encode time) on the same route: 2/499 at area>=8000,
+  0 at 12000/15000, against the usual 20-40 %.
+- Default on: three consecutive 90 s runs, 0/499 at 8000/12000/15000.
+
+Fix: in `mtl_sub_copy`, copy sources <= 8 MiB into a host ring at encode time and encode the copy from the ring,
+so the GPU copies the bytes as of the copy's position in the command stream. This is the treatment the inline
+uniform update already had. The ring is per submission and retired with `defer_obj_release`;
+`DM_NVN_COPY_SNAP=0` restores the old path.
+
+Provenance: `mtl_sub_copy` is upstream (seedds, f739638 / 50a9c65); the snapshot mechanism and its default are
+this fork's (ce87f41 / bfb586c / 021c612). The fix is generic - any title that reuses a copy source before the
+GPU executes it - and is upstream PR seedds/nxnative#21 (branch armyja:copysnap, f3057ac).
+
+Lessons:
+
+- A zero-copy buffer read on the CPU is the state at encode, not what the GPU reads at execution; `pend_hits` on
+  the range tells which one you are looking at. The earlier "index buffer overwritten" reading was a stale view.
+- Per-draw byte dumps (`DM_NVN_DUMP`) are far more useful than a 2 GB .gputrace for buffer contents; a clean and
+  a bad dump of the same frame number are enough to diff, with no GPU capture.
+- The .gputrace tool writes a single frame and must stay on APFS; frame lists and the exFAT 2 TB volume produced
+  traces Xcode could not open. The working form: start at the frame's first draw, stop at the first present at
+  or after it.
+- Run-level variance is large (0-39 % historically); the range A/B plus three consecutive 0/499 runs are stronger
+  than any single before/after.
