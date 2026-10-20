@@ -5533,6 +5533,40 @@ frz_plain:;
       if (sd_on) { uint64_t f = atomic_load(&g_cur_frame); if (f != sd_frame) { sd_frame = f; sd_k = 0; }
           long k = sd_k++;
           if ((sd_a >= 0 && k >= sd_a && k <= sd_b) || (sd_c >= 0 && k >= sd_c && k <= sd_d)) return; } }
+    // Diagnostic DM_NVN_FP=a-b: one line per draw with a hash of the bytes this draw will actually read
+    // (vertex streams, index buffer), so a corrupted frame can be compared with its clean neighbours by
+    // input content rather than by API calls. Reads guest memory directly (the CBDUMP path does the same).
+    { static int fp_on = -1; static long fp_a = -1, fp_b = -1; static uint64_t fp_fr = ~0ull; static long fp_k;
+      if (fp_on < 0) { const char *e = getenv("DM_NVN_FP"); fp_on = e && *e;
+          if (fp_on) { fp_a = atol(e); fp_b = strchr(e, '-') ? atol(strchr(e, '-') + 1) : fp_a; MLOG("DM_NVN_FP: per-draw input hashes for frames %ld-%ld", fp_a, fp_b); } }
+      if (fp_on) { uint64_t f = atomic_load(&g_cur_frame); long vf = (long)f;
+        if (f != fp_fr) { fp_fr = f; fp_k = 0; }
+        long o = fp_k++;
+        if (vf >= fp_a && vf <= fp_b) {
+          char line[512]; size_t lo = 0; int nv = dw ? dw->count : (di ? di->count : 0);
+          lo += snprintf(line + lo, sizeof line - lo, "[fp] F%ld o%ld p%llu vc=%d vs=%s fs=%s", vf, o,
+                         (unsigned long long)g_stat_pass, nv, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
+          for (int st = 0; st < 16 && lo < sizeof line - 40; st++) {
+            if (!S.vbuf[st].address || !S.vbuf[st].size) continue;
+            uint64_t stride = S.stream[st].stride; if (!stride) continue;
+            uint64_t len = stride * (uint64_t)(nv > 0 ? nv : 0);
+            if (len > S.vbuf[st].size) len = S.vbuf[st].size;
+            uint64_t h = 1469598103934665603ull; const uint8_t *q = (const uint8_t *)S.vbuf[st].address;
+            for (uint64_t i = 0; i < len; i++) h = (h ^ q[i]) * 1099511628211ull;
+            lo += snprintf(line + lo, sizeof line - lo, " v%d=%016llx/%llu", st, (unsigned long long)h, (unsigned long long)len); }
+          if (di && di->ibuf && di->count) {
+            uint64_t len = (uint64_t)di->count * (di->itype == 1 ? 2 : 4);
+            uint64_t h = 1469598103934665603ull; const uint8_t *q = (const uint8_t *)di->ibuf;
+            for (uint64_t i = 0; i < len; i++) h = (h ^ q[i]) * 1099511628211ull;
+            lo += snprintf(line + lo, sizeof line - lo, " ib=%d/%llu/%016llx", di->itype, (unsigned long long)di->count, (unsigned long long)h); }
+          for (int us = 0; us < 2; us++) for (int ur = 0; ur < 8; ur++) {
+            const p_bind_buf *u = &S.ubo[us][ur];
+            if (!u->addr || !u->size || lo > sizeof line - 40) continue;
+            uint64_t len = u->size; if (len > 4096) len = 4096;
+            uint64_t h = 1469598103934665603ull; const uint8_t *q = (const uint8_t *)u->addr;
+            for (uint64_t i = 0; i < len; i++) h = (h ^ q[i]) * 1099511628211ull;
+            lo += snprintf(line + lo, sizeof line - lo, " u%d%d=%016llx/%llu", us, ur, (unsigned long long)h, (unsigned long long)len); }
+          if (lo < sizeof line - 2) { line[lo] = '\n'; line[lo + 1] = 0; fputs(line, stderr); } } } }
     // Diagnostic DM_NVN_VBBOX=a-b: for every draw of frames a..b, read the position attribute of the first
     // up to 64 vertices and print its bounding box. A draw whose bbox jumps on the corrupted frames is the
     // one whose vertex data is wrong; nothing is skipped, so the picture stays intact.
