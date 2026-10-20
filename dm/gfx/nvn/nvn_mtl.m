@@ -5582,28 +5582,32 @@ static void vb_overlap_check(const p_draw_idx *di) {
     long long maxix = -1;
     if (imapped) {
         const uint8_t *p = (const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + ioff;
+        uint32_t sentinel = isz == 1 ? 0xFF : isz == 2 ? 0xFFFF : 0xFFFFFFFFu;
         for (int i = 0; i < di->count; i++) {
             uint32_t v = isz == 1 ? p[i] : isz == 2 ? ((const uint16_t *)p)[i] : ((const uint32_t *)p)[i];
+            if (v == sentinel) continue;   // primitive restart / padding, not a vertex reference
             if ((long long)v > maxix) maxix = (long long)v;
         }
         maxix += di->base_vertex > 0 ? di->base_vertex : 0;
     }
+    if (!imapped || maxix < 0) return;
     for (int st = 0; st < S.nstream && st < 16; st++) {
         uint64_t vlo = S.vbuf[st].address, vsz = S.vbuf[st].size;
         if (!vlo || !vsz) continue;
         uint32_t stride = S.stream[st].stride;
         uint64_t cap = stride ? vsz / stride : 0;
         int overlap = ilo < vlo + vsz && vlo < ihi;
-        int past = imapped && maxix >= 0 && cap && (uint64_t)maxix >= cap;
+        int past = cap && (uint64_t)maxix >= cap;
         if (!overlap && !past) continue;
-        static uint64_t logged_f = ~0ull; static int logged_st = -1;
+        static uint64_t logged_f = ~0ull;
         uint64_t f = atomic_load(&g_cur_frame);
-        if (logged_f == f && logged_st == st) continue;
-        logged_f = f; logged_st = st;
+        if (logged_f == f) return;   // one line per frame, even when several draws/streams qualify
+        logged_f = f;
         MLOG("[RED] frame %llu: index buffer %#llx+%llu (%d-bit x %d, max %lld) %s vertex stream %d %#llx+%llu (stride %u, capacity %llu)",
              (unsigned long long)f, (unsigned long long)ilo, (unsigned long long)ilen, di->itype == 0 ? 8 : di->itype == 1 ? 16 : 32,
              di->count, maxix, overlap ? "overlaps" : "is past", st, (unsigned long long)vlo, (unsigned long long)vsz,
              stride, (unsigned long long)cap);
+        return;
     }
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) {
