@@ -5595,18 +5595,16 @@ static void vb_overlap_check(const p_draw_idx *di) {
         uint64_t vlo = S.vbuf[st].address, vsz = S.vbuf[st].size;
         if (!vlo || !vsz) continue;
         uint32_t stride = S.stream[st].stride;
-        uint64_t cap = stride ? vsz / stride : 0;
-        int overlap = ilo < vlo + vsz && vlo < ihi;
-        int past = cap && (uint64_t)maxix >= cap;
-        if (!overlap && !past) continue;
+        if (!stride) continue;
+        uint64_t ulo = vlo, uhi = vlo + (uint64_t)(maxix + 1) * stride;   // bytes this draw's vertices occupy
+        if (ilo >= uhi || ulo >= ihi) continue;                            // index bytes are outside the fetched range: the common, benign case
         static uint64_t logged_f = ~0ull;
         uint64_t f = atomic_load(&g_cur_frame);
         if (logged_f == f) return;   // one line per frame, even when several draws/streams qualify
         logged_f = f;
-        MLOG("[RED] frame %llu: index buffer %#llx+%llu (%d-bit x %d, max %lld) %s vertex stream %d %#llx+%llu (stride %u, capacity %llu)",
+        MLOG("[RED] frame %llu: index bytes %#llx+%llu (%d-bit x %d, max %lld) overlap vertex stream %d %#llx+%llu (stride %u, used to %#llx); the vertex fetch reads index data",
              (unsigned long long)f, (unsigned long long)ilo, (unsigned long long)ilen, di->itype == 0 ? 8 : di->itype == 1 ? 16 : 32,
-             di->count, maxix, overlap ? "overlaps" : "is past", st, (unsigned long long)vlo, (unsigned long long)vsz,
-             stride, (unsigned long long)cap);
+             di->count, maxix, st, (unsigned long long)vlo, (unsigned long long)vsz, stride, (unsigned long long)uhi);
         return;
     }
 }
