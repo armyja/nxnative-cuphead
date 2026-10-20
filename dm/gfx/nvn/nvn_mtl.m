@@ -7414,11 +7414,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
     }
-    for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n);
+    static int shot_anchor_render = -1;
+    if (shot_anchor_render < 0) { const char *a = getenv("DM_NVN_SHOT_ANCHOR"); shot_anchor_render = a && !strcmp(a, "render"); }
+    for (int i = 0; i < nshot; i++) {
+        long cur = shot_anchor_render ? (long)frame : (long)g_present_n;
+        if (cur != shots[i]) continue;
+        char path[1024]; snprintf(path, sizeof path, shot_path, (int)cur);
         // Present sequence numbers can diverge from rendered frames when the display link drops or merges frames.
         // Join captures to draw diagnostics with the enqueued frame, never with the screenshot filename alone.
-        MLOG("[shot-map] present=%llu render=%llu ticket=%llu", (unsigned long long)g_present_n, (unsigned long long)frame, (unsigned long long)ticket);
-        mtl_finish_gpu(); shot(src, path, 1, crop); }
+        MLOG("[shot-map] present=%llu render=%llu ticket=%llu anchor=%s", (unsigned long long)g_present_n, (unsigned long long)frame, (unsigned long long)ticket, shot_anchor_render ? "render" : "present");
+        mtl_finish_gpu(); shot(src, path, 1, crop);
+    }
     pthread_mutex_lock(&g_shotq_mu);
     for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
     pthread_mutex_unlock(&g_shotq_mu);

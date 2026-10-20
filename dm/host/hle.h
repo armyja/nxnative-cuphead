@@ -17,6 +17,7 @@ typedef uint32_t Result;   // nn::Result: w0, 0 = success
 void *objmap_get(const void *guest);
 void objmap_put(const void *guest, void *host);
 void *objmap_del(const void *guest);
+void dm_play_in_tick(uint64_t frame);   // hle_hid.c: apply the DM_PLAY_IN steps at a guest frame boundary
 uint64_t now_ns(void);
 // This thread is doing the host's own heavy work (NVN submit / present: encoding Metal commands; on hardware that is the GPU's business and does not occupy a guest core). The same-core preemption approximation (hle_thread.c) does not count it as "running"
 extern __thread _Atomic int dm_host_work;

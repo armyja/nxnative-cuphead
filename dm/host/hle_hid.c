@@ -68,15 +68,16 @@ static void rec_set(void) {
     fprintf(g_rec, "%.3f\t%llu\t%d\t%d\t%d\t%d\t%llu\n", (now_ns() - g_t0_ns) / 1e9, (unsigned long long)buttons, lx, ly, rx, ry, (unsigned long long)dm_guest_frame());
     fflush(g_rec);
 }
-static void *in_main(void *arg) {
-    in_row *rows = arg; size_t n = 0;
-    while (n < 65536 && rows[n].frame) n++;   // rows are terminated by a zero frame
-    for (size_t i = 0; i < n; i++) {
-        while (dm_guest_frame() < rows[i].frame) usleep(2000);
-        dm_pad_set(rows[i].btn, rows[i].lx, rows[i].ly, rows[i].rx, rows[i].ry);
+static in_row *g_pi_rows; static size_t g_pi_n, g_pi_i; static int g_pi_done;
+// Applied at the guest frame boundary (dm_guest_frame_tick) instead of a polling thread: a thread can be
+// scheduled a frame late, which changes the route between otherwise identical runs.
+void dm_play_in_tick(uint64_t f) {
+    if (!g_pi_rows) return;
+    while (g_pi_i < g_pi_n && g_pi_rows[g_pi_i].frame <= f) {
+        in_row *r = &g_pi_rows[g_pi_i++];
+        dm_pad_set(r->btn, r->lx, r->ly, r->rx, r->ry);
     }
-    dm_pad_set(0, 0, 0, 0, 0);
-    return NULL;
+    if (g_pi_i == g_pi_n && !g_pi_done) { g_pi_done = 1; dm_pad_set(0, 0, 0, 0, 0); }
 }
 static void play_in(void) {
     const char *e = getenv("DM_PLAY_IN"); if (!e || !*e) return;
@@ -90,8 +91,8 @@ static void play_in(void) {
         rows[n++] = (in_row){ fr, b, lx, ly, rx, ry };
     }
     fclose(f);
-    LOG("DM_PLAY_IN: %zu steps from %s (stepped by presented frame)", n, e);
-    pthread_t th; if (n && !pthread_create(&th, NULL, in_main, rows)) pthread_detach(th);
+    LOG("DM_PLAY_IN: %zu steps from %s (applied at the guest frame tick)", n, e);
+    g_pi_rows = rows; g_pi_n = n; g_pi_i = 0; g_pi_done = 0;
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR (plus the sticks LLeft LUp LRight LDown and RLeft RUp RRight RDown) Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown,

@@ -5,6 +5,8 @@
 #include <mach/mach_time.h>
 #include <stdatomic.h>
 
+__attribute__((weak)) void dm_play_in_tick(uint64_t frame) { (void)frame; }   // tests that link hle_os without hle_hid
+
 // ---------- Side table ----------
 #define OM_SIZE (1u << 18)
 static struct { const void *k; void *v; } g_om[OM_SIZE];
@@ -70,6 +72,7 @@ static void det_on_uimsg(const char *cat, const char *act, const char *arg) {
 void dm_guest_frame_tick(void) {
     crash_watch_frame();
     atomic_fetch_add(&g_guest_frame, 1);
+    dm_play_in_tick(dm_guest_frame());
     if (!detclock_cfg()) return;
     if (!atomic_load(&g_gdet_on)) {
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
