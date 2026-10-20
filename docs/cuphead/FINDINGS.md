@@ -1365,3 +1365,30 @@ Remaining, in order:
 2. The draw's own encoding/execution: which command the GPU executes, argument-table contents at execution (now excluded for the shared table), render-target aliasing, pass order.
 
 Separate defect found: an intermittent guest deadlock at F957 (fullB, fullD, idxA, idxC, ubA; 5 of 10 deterministic-clock runs). The guest main thread and two workers wait on the same condvar; the run never reaches the capture window. fullA/fullC/fullE/atB/ubB passed. It is not the shard and not loading-clock freeze; it looks like another lost-wakeup instance in the host's process-wide key/condvar path (hle_thread.c 0x1C/0x1D already has one fixed case and t_condvar). The no-clock run idxB passed; removing DM_DETCLOCK/PACE avoided it once but not always.
+
+## Round 41: the GPU-drain exclusion becomes an in-run A/B; safe math is inconclusive
+
+`DM_NVN_DRAIN=ab` makes every second rendered frame wait for its own submission to complete (`mtl_wait(sub_fence)`)
+before returning to the game, so the next frame's CPU writes cannot land in memory this frame's GPU still reads.
+This replaces the old cross-run `DM_NVN_MAX_INFLIGHT=0` comparison (94/501 vs baseline 18/501), which violated the
+in-run rule. One no-clock run, 501 captures, 501 present->render maps, 249/250 frames per arm:
+
+| area >= | drain | async |
+|---|---|---|
+| 8000 | 77/249 (30.9%) | 70/250 (28.0%) |
+| 12000 | 55/249 (22.1%) | 51/250 (20.4%) |
+| 15000 | 41/249 (16.5%) | 42/250 (16.8%) |
+
+No reduction; the GPU-lag / CPU-rewrite race is excluded with the same in-run discipline as the other axes.
+
+Safe math: the 1515 vertex shaders were recompiled offline with `xcrun metal -fno-fast-math` (pixel shaders
+unchanged) and the host was run on the shard-rich deterministic route (`DM_DETCLOCK=... DM_NVN_SNAP_VB=full`).
+The safe run (safeB) showed 48/37 shards at area>=8000, 25/22 at 12000, 14/17 at 15000. An adjacent run with the
+restored fast shaders (fastB), same route and settings, showed **0/499 at every threshold**. The fast shaders can
+produce a clean run, so the difference between fullE/safeB is run-level variance, not the math mode: the cross-run
+safe-math test is inconclusive. A valid test needs an in-run fast/safe vertex-shader switch. The NaN / 1.7e38
+values in uniforms and attributes remain a lead, not an established cause.
+
+Measurement trap, again: the no-clock baseline/safe pair died and the area scorer counted the death/retry
+transition (diagonal wipe, menu); the 1900-2100 gameplay window was clean in both. The 42/499 vs 124/499 difference
+in that pair was the death-screen timing, not the shard. Always inspect the top frames.

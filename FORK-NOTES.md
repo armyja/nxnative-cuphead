@@ -103,7 +103,9 @@ run** (per-frame 50/50 schedule), not a cross-run comparison. Raw numbers and re
 |---|---|
 | Host-lent command segments (`nvn_hostseg_only on`) | whole-view corruption every ~4th frame; off fixes that class. |
 | FXAA skip (`DM_NVN_NOFXAA`) | the symptom moves, it does not disappear. |
-| Submissions in flight 0/1/2/unbounded | no effect; fully synchronous is worse (94 vs 18 bad of 501). |
+| Submissions in flight 0/1/2/unbounded | the old result was cross-run (fully synchronous 94 vs baseline 18 of 501); replaced by the in-run drain A/B below. |
+| GPU drain, every second frame (`DM_NVN_DRAIN=ab`) | no effect: 77/249 vs 70/250 at 8000, 55 vs 51 at 12000, 41 vs 42 at 15000. The GPU-lag/CPU-rewrite race is excluded in-run. |
+| Vertex shaders recompiled with `-fno-fast-math` (1515 VS) | inconclusive: safeB 48/37 at 8000, an adjacent fastB 0/499; run variance dominates. Needs an in-run fast/safe shader switch. |
 | Buffer-copy source snapshotted at encode time | no effect (27/500 vs 27/498 at area >= 12000). |
 | Uniform content / inline updates / deferred updates (`DM_NVN_UB_DEFER=0`) | no effect. |
 | Binding identity, pipeline state, vertex layout, draw parameters, draw set/order, texture binding | identical on corrupted and phase-matched clean frames (0 transient hits). |
@@ -121,7 +123,32 @@ run** (per-frame 50/50 schedule), not a cross-run comparison. Raw numbers and re
 produces one blown-up triangle. The draw's CPU-side inputs, their provenance and their delivery are
 excluded. What remains is (a) texture content, especially textures sampled by vertex shaders (the only
 data class not measured; a wrong vertex-stage texture displaces vertices), and (b) the draw's own
-encoding/execution (which command the GPU runs, render-target aliasing, pass order).
+encoding/execution (which command the GPU runs, render-target aliasing, pass order). The GPU-lag/CPU-rewrite
+race is now excluded in-run; safe math is not established.
+
+## Round 41: GPU drain and safe math
+
+The old "not GPU lag" exclusion compared two runs (synchronous 94/501 vs baseline 18/501), which violates the
+in-run rule. `DM_NVN_DRAIN=ab` (added in this round) waits for the frame's own submission on every second frame:
+8000 77/249 (drain) vs 70/250 (async), 12000 55 vs 51, 15000 41 vs 42. No reduction, so the GPU-lag/CPU-rewrite
+race is excluded in-run.
+
+Safe math was tested by recompiling the 1515 vertex shaders offline with `xcrun metal -fno-fast-math` (pixel
+shaders unchanged) and running the shard-rich deterministic route. The safe run (safeB) had 48/37 shards at 8000,
+25/22 at 12000, 14/17 at 15000; an adjacent run with the restored fast shaders (fastB), same route and settings,
+had **0/499 at every threshold**. A fast run can be clean, so run-level variance dominates and the safe-math test
+is inconclusive, not evidence. A valid test needs an in-run fast/safe vertex-shader switch; the NaN / 1.7e38
+values remain a lead, not an established cause.
+
+The no-clock pair also repeated the scorer trap: the 124 vs 42 difference at 8000 was the death/retry transition
+(diagonal wipe and menu), not the shard; the 1900-2100 gameplay was clean in both.
+
+| | |
+|:---:|:---:|
+| ![GPU drain A/B](docs/cuphead/images/r41-drain-ab.jpg) | ![Safe-math VS shards](docs/cuphead/images/r41-safeB-shards.jpg) |
+| **GPU drain A/B** - top frames; both the drain and async arms still show the shard. | **Safe-math VS (safeB)** - shards persist (2145/2148, 2271/2274). |
+| ![Fast VS clean](docs/cuphead/images/r41-fastB-clean.jpg) | ![Death transition](docs/cuphead/images/r41-safeA-death-screen.jpg) |
+| **Fast VS (fastB)** - zero shards in the same route; the safe-math comparison is confounded by run variance. | **safeA no-clock** - the scorer counts the death/retry wipe; the 1900-2100 gameplay is clean. |
 
 ## Open problems and next steps
 
@@ -134,6 +161,9 @@ encoding/execution (which command the GPU runs, render-target aliasing, pass ord
    - **The draw's own encoding/execution.** Which command the GPU actually runs, argument-table contents at
      execution (excluded for the shared table), render-target aliasing and pass order. A targeted
      immutable replay of the first anomalous draw is the fallback.
+   - **Fast-math / NaN amplification.** The cross-run safe-math test is inconclusive (Round 41); a valid test
+     needs an in-run fast/safe vertex-shader switch, or a NaN/Inf sanitizer on the translated vertex position.
+     The NaN values in unused uniform slots and the 1.7e38 vertex attributes are the motivation.
 2. **Frame-957 deadlock.** 5 of 10 deterministic-clock runs; the guest main thread and two workers wait on
    one condition variable. The host's process-wide key path already fixes one lost wakeup; this looks like
    a second instance. Workaround for capture runs: omit `DM_DETCLOCK` / `DM_DETCLOCK_PACE`.
@@ -158,6 +188,7 @@ of the shredding and is recorded here because it blocks long capture runs.
 - `DM_NVN_SNAP_IB=ab`: the same for index buffers, with `[snapib-frame]` coverage (`copied`, `diff`).
 - `DM_NVN_SNAP_UB=ab`: the same for uniform blocks.
 - `DM_NVN_ARG_TABLE=ab`: shared vs one private `MTL4ArgumentTable` per draw, per-frame A/B.
+- `DM_NVN_DRAIN=ab`: every second frame waits for its own submission before returning to the game.
 - `DM_NVN_COPY_SNAP`, `DM_NVN_PENDK`, `DM_NVN_PASSDUMP`, `DM_NVN_CBDUMP`, `DM_NVN_VBBOX`, `DM_NVN_SKIP_DRAW`.
 - `[shot-map] present=N render=F`: joins a capture to the draw-side frame.
 - `DM_WINDOW_SMALL` / `DM_WINDOW_FLOAT`: a 480x270 floating capture window that does not take key focus.

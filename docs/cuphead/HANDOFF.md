@@ -1,5 +1,5 @@
 <!-- Cleaned copy of the working handoff; personal paths are placeholders:
-     <repo>, <cuphead-work>, <saves>. The round-40 status in ../FORK-NOTES.md supersedes the status
+     <repo>, <cuphead-work>, <saves>. The round-40/41 status in ../FORK-NOTES.md supersedes the status
      sections below. -->
 > **Round 39 audit correction (2026-10-20):** The round-38 vertex-axis exclusion below is invalid.
 > The `DM_NVN_SNAP_VB=full` draw-side parser never sets `sv=2`; it parses `full` with `atol` as a
@@ -280,3 +280,9 @@ across snapshots and builds).
 Remaining: texture content (especially vertex-stage texture fetches - the only unmeasured data class), and the draw's own encoding/execution. Imaging a texture mid-pass needs a design because a texture copy ends the render pass.
 
 Separate: intermittent guest deadlock at F957 (5 of 10 deterministic-clock runs) blocks the capture window; the no-clock run idxB passed. The guest main thread and two workers wait on one condvar. Not the shard.
+
+## Round 41 (2026-10-20)
+
+- GPU drain in-run A/B (`DM_NVN_DRAIN=ab`): 8000 77/249 drain vs 70/250 async, 12000 55 vs 51, 15000 41 vs 42 - no reduction. The old cross-run "not GPU lag" is replaced by this in-run result.
+- Safe-math VS recompile (1515 VS, `-fno-fast-math`): safeB 48/37 at 8000, 25/22 at 12000, 14/17 at 15000; fastB, same route, 0/499 at every threshold. Run variance dominates; the safe-math test is inconclusive, not evidence. Needs an in-run fast/safe shader switch.
+- Measurement: the no-clock pair's 124 vs 42 at 8000 was the death/retry transition in the scorer, not the shard; the 1900-2100 gameplay was clean in both.
