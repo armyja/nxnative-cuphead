@@ -521,6 +521,17 @@ typedef struct { uint64_t dst_lo, dst_hi, src_lo, srcoff; __unsafe_unretained id
 static pkw_t g_pkw[PKW_MAX]; static int g_npkw, g_pkw_over;
 static id<MTLBuffer> g_pkw_buf; static size_t g_pkw_off, g_pkw_size;
 static uint64_t g_pkw_n, g_pkw_bytes;
+static void pkw_apply(uint64_t lo, uint64_t n, uint8_t *out) {
+    for (int i = 0; i < g_npkw; i++) { const pkw_t *e = &g_pkw[i];
+        uint64_t a = e->dst_lo > lo ? e->dst_lo : lo, b = e->dst_hi < lo + n ? e->dst_hi : lo + n;
+        if (a >= b) continue;
+        if (e->kind == 1 || e->kind == 2) memcpy(out + (a - lo), (const uint8_t *)e->srcbuf.contents + e->srcoff + (a - e->dst_lo), (size_t)(b - a));
+        else if (e->kind == 3) { uint8_t pat[4]; memcpy(pat, &e->pat, 4); for (uint64_t k = a; k < b; k++) out[k - lo] = pat[(k - e->dst_lo) & 3]; } } }
+static int pkw_have;   // defined below with the switch
+// Apply every write recorded so far, in submission order, to the image of [lo, lo+n) held in out. Writes of kind 1 (copy) and
+// 2 (inline update) carry the payload bytes in the ring; kind 3 carries the 4-byte fill pattern. This is what makes the image
+// faithful: NVN semantics are "the bytes as of this position in the command stream", and this replays exactly that.
+static void pkw_apply(uint64_t lo, uint64_t n, uint8_t *out);
 // DM_NVN_PENDK=1: per frame and per *consumer* binding, which kind of GPU-side write covers it (1 buffer copy, 2 inline
 // uniform update, 3 fill, 4 texture-to-buffer copy, 0 readable). This is the table the Metal-4 review asked for: producer
 // kind -> consumer stage -> same range -> how it is ordered.
@@ -805,7 +816,9 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
             g_pkw_buf = [g_dev newBufferWithLength:g_pkw_size options:MTLResourceStorageModeShared];
             if (!g_pkw_buf) MDIE("post-write image ring allocation failed %#zx", need);
             res_add(g_pkw_buf); g_pkw_off = 0; }
-        memcpy((uint8_t *)g_pkw_buf.contents + g_pkw_off, (const uint8_t *)[(__bridge id<MTLBuffer>)sb contents] + so, (size_t)n);
+        uint8_t *sp = (uint8_t *)g_pkw_buf.contents + g_pkw_off;
+        memcpy(sp, (const uint8_t *)[(__bridge id<MTLBuffer>)sb contents] + so, (size_t)n);
+        pkw_apply(src, n, sp);   // a source written by an earlier copy / update in this submission: resolve it, do not take the stale bytes
         g_pkw[g_npkw++] = (pkw_t){dst, dst + n, src, g_pkw_off, g_pkw_buf, 0, 1};
         g_pkw_off += need; g_pkw_n++; g_pkw_bytes += n; } }
     if (cps_here() && n <= (8u << 20)) {
@@ -881,6 +894,18 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!mtl_addr(dst, n, &db, &dof)) {
         static int n_log; if (n_log++ < 400) fprintf(stderr, "[dropub] F%llu dst=%#llx n=%#llx\n", (unsigned long long)dm_guest_frame(), (unsigned long long)dst, (unsigned long long)n);
         return; }
+    { extern int snapvb_full(void);
+      if (snapvb_full() && n <= (16u << 20) && g_npkw < PKW_MAX) {   // the payload is command memory: keep it for the post-write image
+        size_t need2 = (size_t)((n + 255ull) & ~255ull);
+        if (!g_pkw_buf || g_pkw_off + need2 > g_pkw_size) {
+            if (g_pkw_buf) defer_obj_release(g_pkw_buf);
+            g_pkw_size = MAX((size_t)4 << 20, need2);
+            g_pkw_buf = [g_dev newBufferWithLength:g_pkw_size options:MTLResourceStorageModeShared];
+            if (!g_pkw_buf) MDIE("post-write image ring allocation failed %#zx", need2);
+            res_add(g_pkw_buf); g_pkw_off = 0; }
+        memcpy((uint8_t *)g_pkw_buf.contents + g_pkw_off, data, (size_t)n);
+        g_pkw[g_npkw++] = (pkw_t){dst, dst + n, dst, g_pkw_off, g_pkw_buf, 0, 2};
+        g_pkw_off += need2; g_pkw_n++; g_pkw_bytes += n; } }
     int defer = enc_open() && g_nubd < UBD_MAX && ubd_on();
     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
     if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
@@ -5643,14 +5668,13 @@ frz_plain:;
                 id<MTLBuffer> ab; size_t ao = arena_alloc((size_t)len, &ab);
                 uint8_t *img = (uint8_t *)ab.contents + ao;
                 memcpy(img, (const void *)S.vbuf[s_].address, (size_t)len);
+                unsigned before = g_npkw; (void)before;
+                pkw_apply(S.vbuf[s_].address, len, img);
                 unsigned applied = 0;
                 for (int i = 0; i < g_npkw; i++) { const pkw_t *e = &g_pkw[i];
                     uint64_t a = e->dst_lo > S.vbuf[s_].address ? e->dst_lo : S.vbuf[s_].address;
                     uint64_t b = e->dst_hi < S.vbuf[s_].address + len ? e->dst_hi : S.vbuf[s_].address + len;
-                    if (a >= b) continue;
-                    if (e->kind == 1) memcpy(img + (a - S.vbuf[s_].address), (const uint8_t *)e->srcbuf.contents + e->srcoff + (a - e->dst_lo), (size_t)(b - a));
-                    else { uint8_t pat[4]; memcpy(pat, &e->pat, 4); for (uint64_t k = a; k < b; k++) img[k - S.vbuf[s_].address] = pat[(k - e->dst_lo) & 3]; }
-                    applied++; }
+                    if (a < b) applied++; }
                 snap_gpu[s_] = ab.gpuAddress + ao; snap_have[s_] = 1; sv_copies++; sv_bytes += len;
                 if (applied) sv_applied++;
                 if (g_pkw_over) sv_gap++;
