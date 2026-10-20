@@ -7436,18 +7436,23 @@ static void gpu_capture_begin(uint64_t frame, const char *path) {
     if (![cm startCaptureWithDescriptor:d error:&err]) MLOG("[RED] GPU capture start failed: %s", err ? err.description.UTF8String : "?");
     else MLOG("GPU capture started at frame %llu draw -> %s", (unsigned long long)frame, path);
 }
-static _Atomic int g_gc_click;
+static _Atomic int g_gc_click; static long g_gc_click_frame = -1;
 void mtl_capture_click(void) { atomic_store(&g_gc_click, 1); }
 static void gpu_capture_draw(uint64_t frame) {
-    if (atomic_exchange(&g_gc_click, 0)) {   // left click in the game window: capture this frame
-        if (g_gc_started) return;
+    if (atomic_exchange(&g_gc_click, 0) && !g_gc_started) {
+        // The click lands while the current frame is already partly drawn; capture the next full frame so the
+        // trace starts at its first draw and contains every draw of the frame, like DM_GPU_CAPTURE does.
+        g_gc_click_frame = (long)atomic_load(&g_cur_frame) + 1;
+        MLOG("GPU capture armed by left click; frame %ld will be captured from its first draw", g_gc_click_frame);
+    }
+    if (g_gc_click_frame > 0 && !g_gc_started && frame >= (uint64_t)g_gc_click_frame) {
         const char *o = getenv("DM_GPU_CAPTURE_OUT");
         char path[1024];
         if (o && strstr(o, "%d")) snprintf(path, sizeof path, o, (int)frame);
         else if (o && *o) snprintf(path, sizeof path, "%s-%llu", o, (unsigned long long)frame);
         else snprintf(path, sizeof path, "%s/cuphead-click-%llu.gputrace", getenv("HOME") ? getenv("HOME") : "/tmp", (unsigned long long)frame);
-        g_gc_want = (long)frame;
-        MLOG("GPU capture armed by left click at frame %llu -> %s", (unsigned long long)frame, path);
+        g_gc_want = (long)frame; g_gc_click_frame = -1;
+        MLOG("GPU capture started by left click at frame %llu -> %s", (unsigned long long)frame, path);
         gpu_capture_begin(frame, path);
         return;
     }
