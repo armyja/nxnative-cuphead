@@ -1396,3 +1396,29 @@ in that pair was the death-screen timing, not the shard. Always inspect the top 
 ## Round 41 addendum: the fast control is not reproducible
 
 A repeat of the fast control (fastC; same `DM_DETCLOCK=16666667 DM_DETCLOCK_PACE=1 DM_NVN_SNAP_VB=full` command, fast vertex shaders) had a present->render offset of 20-57 and 96/86 shards at area>=8000 (39.2 % / 33.9 %), 67/67 at 12000 and 51/54 at 15000. The first fast control (fastB) had offset 18-99 and 0/499. Same shaders, same command: 0 vs 182 hot at 8000. The fast shaders span the whole range; the safeB 48/37 is inside it. The safe-math test is confounded by run-level variance and remains inconclusive; the fastB zero was a clean route, not a fix.
+
+## Round 42: anchoring the input and captures to the guest frame; the run start is still missing
+
+DM_PLAY_IN was already stepped by dm_guest_frame() (the game's present frame), not by the screen present
+count; the screen-present offset only shifted which game frames the captures sampled. Two real jitters
+remained: the replay ran in a polling thread (usleep 2000, up to a frame late), and DM_NVN_SHOT selected
+captures by the screen present count. Both are fixed: the replay steps are now applied synchronously in
+dm_guest_frame_tick, and DM_NVN_SHOT_ANCHOR=render selects captures by the guest frame.
+
+Two anchored fast runs (same save/input/detclock/shader set) still diverged: A 467 captures and 37 shards
+at area>=8000, B 442 captures and 0; the same render frame draw counts differ in 1421 of 4345 common frames
+(33%; F144 A=7 B=11, F189 A=11 B=7). The same-F images are out of phase (player and effect positions), not
+identical. The anchoring removed the replay jitter and the capture-window shift, but not the run-level
+divergence.
+
+The logs show the next gap: the DM_DETCLOCK "on entering a run (ToGame)" alignment never fires for Cuphead
+(the uimsg hook is d2r's), so the guest clock is seeded from the wall clock at the first present. The two
+runs' time base differs by the boot/loading wall time; the game's time-based animations and the input/capture
+windows (absolute guest frame) are phase-shifted. The fix is to align the guest clock and rebase the input and
+capture at Cuphead's run start (its own uimsg, or the save/level load), not at the absolute first present.
+
+The offset statistics across runs show no simple relation to the shard rate (fastB mean 60 / max 99 -> 0%;
+fastC 38.8/57 -> 36.5%; drainA 8.9/10 -> 29.5%): the display-link offset is a marker of present lag, not the
+cause. The same-F comparison of fullE/safeB/fastB/fastC shows close draw counts but different player/particle
+positions; at F2100 only fullE has a shard, at F2300 only fullE has died. The shard stays run-level timing;
+the in-run A/B remains the only clean comparison, and the texture-content A/B must be in-run.

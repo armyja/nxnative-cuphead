@@ -29,6 +29,8 @@ either. Not affiliated with Nintendo or Studio MDHR.
    never been imaged. A per-frame A/B needs a private copy of each vertex-stage texture at encode time. A
    texture copy ends the render pass, so the snapshot has to be taken before the pass opens (or the pass
    re-opened after it); the design is in Open problems. Nothing in the table below covers texture content.
+   It must be measured in-run: the route is not deterministic across runs until the run-start anchor exists
+   (Round 42).
 2. **"Not GPU delay", per-frame 50/50: done.** `DM_NVN_DRAIN=ab` waits for the frame's own submission on every
    second frame: 8000 77/249 (drain) vs 70/250 (async), 12000 55 vs 51, 15000 41 vs 42. No effect. This
    replaces the old cross-run `MAX_INFLIGHT` comparison (94 vs 18 of 501).
@@ -117,6 +119,7 @@ run** (per-frame 50/50 schedule), not a cross-run comparison. Raw numbers and re
 | Submissions in flight 0/1/2/unbounded | the old result was cross-run (fully synchronous 94 vs baseline 18 of 501); replaced by the in-run drain A/B below. |
 | GPU drain, every second frame (`DM_NVN_DRAIN=ab`) | no effect: 77/249 vs 70/250 at 8000, 55 vs 51 at 12000, 41 vs 42 at 15000. The GPU-lag/CPU-rewrite race is excluded in-run. |
 | Vertex shaders recompiled with `-fno-fast-math` (1515 VS) | inconclusive: safeB 48/37 at 8000; the fast control was 0/499 once (fastB) and 96/86 in a repeat (fastC, 39.2/33.9). The fast shaders span 0-39%; run variance dominates. Needs an in-run fast/safe switch. |
+| Input/capture anchored to the guest frame (`DM_PLAY_IN` tick, `DM_NVN_SHOT_ANCHOR=render`) | removed the replay thread's up-to-a-frame jitter and the capture-window shift, but two anchored runs still differ in 1421/4345 draw counts (33%) and 0 vs 37 shards; the guest clock/run-start anchor is still missing (the ToGame alignment does not fire for Cuphead). |
 | Buffer-copy source snapshotted at encode time | no effect (27/500 vs 27/498 at area >= 12000). |
 | Uniform content / inline updates / deferred updates (`DM_NVN_UB_DEFER=0`) | no effect. |
 | Binding identity, pipeline state, vertex layout, draw parameters, draw set/order, texture binding | identical on corrupted and phase-matched clean frames (0 transient hits). |
@@ -135,7 +138,8 @@ produces one blown-up triangle. The draw's CPU-side inputs, their provenance and
 excluded. What remains is (a) texture content, especially textures sampled by vertex shaders (the only
 data class not measured; a wrong vertex-stage texture displaces vertices), and (b) the draw's own
 encoding/execution (which command the GPU runs, render-target aliasing, pass order). The GPU-lag/CPU-rewrite
-race is now excluded in-run; safe math is not established.
+race is now excluded in-run; safe math is not established. The guest-frame input/capture anchor is in place
+(Round 42); the run-start anchor is still missing, so cross-run comparisons remain invalid.
 
 ## Round 41: GPU drain and safe math
 
@@ -167,10 +171,57 @@ The no-clock pair also repeated the scorer trap: the 124 vs 42 difference at 800
 | ![Fast VS repeat (fastC)](docs/cuphead/images/r41-fastC-shards.jpg) | |
 | **Fast VS repeat (fastC)** - same fast shaders and command, offset 20-57: 96/86 shards at 8000; the fastB zero was not reproducible. | |
 
+## Round 42: the guest frame is anchored; the run start is not
+
+The replay was already stepped by `dm_guest_frame()` (the game's present frame), not the screen present count;
+the screen offset only changed which game frames the captures sampled. The real jitters were the replay's
+polling thread (up to a frame late) and `DM_NVN_SHOT` selecting by the screen present. Both are fixed:
+`DM_PLAY_IN` applies its steps in `dm_guest_frame_tick`, and `DM_NVN_SHOT_ANCHOR=render` captures by guest
+frame.
+
+Two anchored fast runs still diverged: A had 467 captures and 37 shards at 8000, B 442 captures and 0; the
+same render-frame draw counts differ in 1421 of 4345 common frames (33%; F144 A=7 B=11, F189 A=11 B=7), and
+the same-F images are out of phase. The replay/capture anchoring removed its own jitter, not the run-level
+divergence.
+
+The missing anchor is the run start. The `DM_DETCLOCK` "on entering a run (ToGame)" alignment never fires for
+Cuphead (the uimsg hook is d2r's), so the guest clock is seeded from the wall clock at the first present: the
+two runs' time base differs by the boot/loading wall time, and the time-based animations plus the absolute-
+frame input/capture windows are phase-shifted. Align the guest clock and rebase the input/capture at Cuphead's
+own run start (its uimsg, or the save/level load), not at the first present.
+
+The display-link offset across runs does not explain the rate:
+
+| run | offset mean / max | shards >=8000 |
+|---|---|---|
+| fullE | 35.5 / 54 | 134/499 |
+| safeB | 30.5 / 50 | 85/499 |
+| fastB | 60.1 / 99 | 0/499 |
+| fastC | 38.8 / 57 | 182/499 |
+| atB | 20.7 / 33 | 128/499 |
+| idxB | 9.3 / 13 | 45/499 |
+| idxC | 28.0 / 40 | 40/499 |
+| ubB | 33.7 / 50 | 32/499 |
+| drainA | 8.9 / 10 | 147/499 |
+
+It is a marker of present lag, not the cause. The same-F comparison of four earlier runs shows close draw
+counts but different player/particle positions; at F2100 only fullE has a shard, at F2300 only fullE has
+died. The shard is run-level timing; the in-run A/B remains the only clean comparison, and the texture-content
+A/B must be in-run too.
+
+| | |
+|:---:|:---:|
+| ![anchored same-F](docs/cuphead/images/r42-anchor-same-f.jpg) | ![same-F four runs](docs/cuphead/images/r42-same-render-4runs.jpg) |
+| **Two anchored fast runs at the same render frame** - the player/effect phase differs; 1421/4345 draw counts differ, 37 vs 0 shards. | **Four earlier runs at the same render frame** - similar scenes; F2100 only fullE shards, F2300 only fullE has died. |
+
 ## Open problems and next steps
 
 1. **Geometry shredding (main).** Every CPU-side input and its delivery is excluded; the GPU still produces
    one blown-up triangle. Two leads remain:
+   - **Run-start anchor.** The guest clock and the absolute-frame input/capture windows shift with the
+     boot/loading because the detclock ToGame hook does not fire for Cuphead; align at Cuphead's run start
+     (its own uimsg or the save/level load) and rebase the windows. Until then cross-run comparisons remain
+     invalid and texture content must be measured in-run.
    - **Texture content, especially vertex-stage texture fetches.** It is the only data class not measured;
      a wrong vertex texture displaces vertices. A texture image cannot simply be copied mid-pass (a copy
      ends the render pass), so the first step is to record, per draw, which vertex-stage textures are
@@ -206,6 +257,7 @@ of the shredding and is recorded here because it blocks long capture runs.
 - `DM_NVN_SNAP_UB=ab`: the same for uniform blocks.
 - `DM_NVN_ARG_TABLE=ab`: shared vs one private `MTL4ArgumentTable` per draw, per-frame A/B.
 - `DM_NVN_DRAIN=ab`: every second frame waits for its own submission before returning to the game.
+- `DM_NVN_SHOT_ANCHOR=render`: select captures by the guest frame instead of the screen present.
 - `DM_NVN_COPY_SNAP`, `DM_NVN_PENDK`, `DM_NVN_PASSDUMP`, `DM_NVN_CBDUMP`, `DM_NVN_VBBOX`, `DM_NVN_SKIP_DRAW`.
 - `[shot-map] present=N render=F`: joins a capture to the draw-side frame.
 - `DM_WINDOW_SMALL` / `DM_WINDOW_FLOAT`: a 480x270 floating capture window that does not take key focus.

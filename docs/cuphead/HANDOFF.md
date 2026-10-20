@@ -1,5 +1,5 @@
 <!-- Cleaned copy of the working handoff; personal paths are placeholders:
-     <repo>, <cuphead-work>, <saves>. The round-40/41 status in ../FORK-NOTES.md supersedes the status
+     <repo>, <cuphead-work>, <saves>. The round-40/41/42 status in ../FORK-NOTES.md supersedes the status
      sections below. -->
 > **Round 39 audit correction (2026-10-20):** The round-38 vertex-axis exclusion below is invalid.
 > The `DM_NVN_SNAP_VB=full` draw-side parser never sets `sv=2`; it parses `full` with `atol` as a
@@ -290,3 +290,11 @@ Separate: intermittent guest deadlock at F957 (5 of 10 deterministic-clock runs)
 ## Round 41 addendum
 
 - fastC (fast shaders, same command): offset 20-57, 96/86 at 8000 (39.2/33.9), 67/67 at 12000, 51/54 at 15000. fastB (same shaders/command, offset 18-99) was 0/499. The fast control spans 0-39%; the safeB 48/37 is inside the range. Safe-math remains inconclusive.
+
+## Round 42 (2026-10-20)
+
+- DM_PLAY_IN now applies at the guest frame tick (no polling thread); DM_NVN_SHOT_ANCHOR=render captures by guest frame. Code 2bf2d4a.
+- Two anchored fast runs still differ: draw counts mismatch in 1421/4345 common render frames (33%); A 37 shards at 8000, B 0. Same-F images out of phase.
+- Cause: the detclock ToGame alignment does not fire for Cuphead; the guest clock is seeded at the first present, so the time base (and the absolute-frame input/capture windows) shifts with the boot/loading. Next: align at Cuphead's run start and rebase input/capture.
+- Offset vs rate: no simple relation (fastB 60/99 -> 0%; fastC 38.8/57 -> 36.5%; drainA 8.9/10 -> 29.5%). Same-F fullE/F2100 shard, others clean; F2300 fullE died. Shard is run-level timing; in-run A/B still required.
+- First anchorA attempt hit the F957 deadlock; the retry passed; anchorB passed.
